@@ -32,6 +32,7 @@ app.whenReady().then(async () => {
     'desktop/update-service.js', 'desktop/story-ai-settings.js',
     'desktop/renderer/index.html', 'desktop/renderer/renderer.js', 'desktop/renderer/styles.css',
     'desktop/backend/batch-service.js', 'src/mvp.js', 'src/story-director.js',
+    'src/music-dedup.js', 'src/music-library.js',
   ]) {
     assert.equal(await fs.readFile(path.join(source, file), 'utf8'),
       await fs.readFile(path.join(repository, file), 'utf8'), `Packaged source mismatch: ${file}`);
@@ -55,7 +56,28 @@ app.whenReady().then(async () => {
 
   const { createStoryAISettings } = require(path.join(source, 'desktop/story-ai-settings'));
   const { requestStoryPlan } = require(path.join(source, 'src/story-director'));
-  const { runBatch } = require(path.join(source, 'src/mvp'));
+  const { runBatch, scanMusic } = require(path.join(source, 'src/mvp'));
+  const { checkMusicLibrary, inspectBatch } = require(path.join(source, 'desktop/backend/batch-service'));
+  const dedupMusic = path.join(fixture, 'same-name-music');
+  const representative = path.join(dedupMusic, 'album2', 'theme.wav');
+  const duplicate = path.join(dedupMusic, 'album10', 'THEME.WAV');
+  await fs.mkdir(path.dirname(representative), { recursive: true });
+  await fs.mkdir(path.dirname(duplicate), { recursive: true });
+  await fs.copyFile(path.join(music, 'fixture.wav'), representative);
+  await fs.writeFile(duplicate, 'invalid audio: same-name copies must not be decoded');
+  const dedupOptions = {
+    music: dedupMusic, ffmpeg, ffprobe, strictInstrumental: false,
+    libraryCacheDir: path.join(temporary, 'library-cache'),
+  };
+  const health = await checkMusicLibrary(dedupOptions);
+  assert.equal(health.total, 1);
+  assert.equal(health.usable, 1);
+  assert.equal(health.nameDuplicateCount, 1);
+  assert.deepEqual(health.duplicates, [{ file: duplicate, original: representative, kind: 'name' }]);
+  assert.deepEqual(health.musicGroups.map(({ count }) => count), [1, 1]);
+  assert.equal((await inspectBatch(dedupOptions)).musicCount, 1);
+  assert.equal([...((await scanMusic(dedupMusic)).values())].flat().length, 2);
+  assert.equal(await fs.readFile(duplicate, 'utf8'), 'invalid audio: same-name copies must not be decoded');
   let requests = 0;
   let providerError;
   const server = http.createServer(async (request, response) => {
@@ -167,7 +189,7 @@ app.whenReady().then(async () => {
   console.log('INDEPENDENT_PACKAGE_OK', JSON.stringify({
     product: '自动配乐', version: packaged.version, ownUpdateFeed: true,
     realTranscription: true, localRequests: requests, silenceSamplesZero: true,
-    isolatedEncryptedSettings: true, screenshots: fixture,
+    isolatedEncryptedSettings: true, sameNameDedupBeforeDecode: true, screenshots: fixture,
   }));
   app.quit();
 }).catch((error) => {
