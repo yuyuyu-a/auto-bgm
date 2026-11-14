@@ -26,9 +26,11 @@ app.whenReady().then(async () => {
     const run = { config: defaults, startedAt: Date.now(), total: 60, currentIndex: 12, currentEpisode: '第12集', currentStage: 'rendering-video', settled: 11, counts: { completed: 9, skipped: 1, failed: 1, interrupted: 0 }, status: 'running', estimatedRemainingMs: null };
     const rows = Array.from({ length: 60 }, (_, i) => ({ episode: `第${i + 1}集`, status: i === 49 ? 'failed' : i < 11 ? 'completed' : 'pending', videoPath: media, duration: 5, tracks: ['calm.wav'] }));
     const detail = { episode: '第1集', duration: 5, status: 'completed', mood: '平静 → 紧张', finalVideoExists: true, finalVideoPath: media, finalVideoUrl: pathToFileURL(media).href, outputPath: audio, audioUrl: pathToFileURL(audio).href, timelinePath: '', transcriptPath: '', transcript: [{ start: .2, end: .8, text: '第一句' }, { start: 1.2, end: 1.8, text: '小心，快跑' }], timeline: [{ start: 0, end: 1, mood: '平静', bgm_file: 'calm.wav', selection_reason: '开场对白', duckSegments: [] }, { start: 1, end: 5, mood: '紧张', bgm_file: 'tense.wav', selection_reason: '危险关键词', duckSegments: [{ start: 1.2, end: 1.8 }] }] };
-    const batch = { rows, paths: Object.fromEntries(['videos', 'music', 'output'].map((key) => [key, { status: 'available', label: '可用' }])), model: { exists: true, sizeBytes: 1024 }, tools: { ffmpeg: { available: true }, ffprobe: { available: true } }, musicGroups: [{ mood: '默认', count: 1 }], warning: null, validationError: '', inputVideoCount: 60 };
+    const batch = { rows, paths: Object.fromEntries(['videos', 'music', 'output'].map((key) => [key, { status: 'available', label: '可用' }])), model: { exists: true, sizeBytes: 1024 }, tools: { ffmpeg: { available: true }, ffprobe: { available: true } }, musicGroups: [{ mood: '默认', count: 2 }, { mood: '紧张', count: 1 }], musicCount: 2, warning: null, validationError: '', inputVideoCount: 60 };
     detail.analysis = { version: 'conservative-scenes-words-v2', strictInstrumental: true, wordTimestamps: true, ducking: { enabled: true, db: -10 }, sceneCandidates: [{ time: 1, used: true }], segments: [{ start: 0, end: 5, reason: '持续对白证据', review: true }] };
-    const library = { total: 2, usable: 1, musicGroups: [], emptyDirectories: [], unavailableMoods: [], duplicates: [], files: [
+    const library = { total: 2, usable: 1, musicGroups: [], emptyDirectories: [], unavailableMoods: [], nameDuplicateCount: 1, duplicates: [
+      { file: path.join(root, 'album', 'instrumental.wav'), original: path.join(root, 'instrumental.wav'), kind: 'name' },
+    ], files: [
       { file: path.join(root, 'suspect.wav'), fileUrl: pathToFileURL(audio).href, playable: true, eligible: false, status: 'unknown', analysis: { intervals: [{ start: 1.2, end: 1.8, label: 'Humming' }] } },
       { file: path.join(root, 'instrumental.wav'), fileUrl: pathToFileURL(audio).href, playable: true, eligible: true, status: 'instrumental' },
     ] };
@@ -48,6 +50,7 @@ app.whenReady().then(async () => {
     };
     await window.loadFile(path.resolve(__dirname, '../desktop/renderer/index.html'));
     await waitFor('document.querySelectorAll("#queue-body tr").length === 60');
+    assert.match(await js('preflightChecks().find(check => check.name === "BGM").label'), /^2 首/);
     assert.equal(await js('document.getElementById("top-start").textContent'), '停止批次');
     assert.match(await js('document.getElementById("batch-progress").textContent'), /12 \/ 60/);
     await js('window.savedInput = document.getElementById("config-videos"); savedInput.focus(); savedInput.setSelectionRange(2, 4); workbenchTest.emitBatch({type:"log", message:"progress while editing"});');
@@ -137,6 +140,16 @@ app.whenReady().then(async () => {
     await waitFor('document.getElementById("top-start").textContent === "开始批次"');
     await js('document.querySelector("[data-action=check-library]").click()');
     await waitFor('document.querySelectorAll(".library-track").length === 2');
+    assert.match(await js('document.querySelector(".library-health").textContent'), /已跳过同名副本 1 份/);
+    assert.match(await js('document.querySelector(".library-health ul").textContent'), /同名已跳过/);
+    assert.doesNotMatch(await js('document.querySelector(".library-health ul").textContent'), /内容重复/);
+    await js('document.getElementById("library-result").scrollIntoView({block:"center"})');
+    await capture('library-name-dedup.png');
+    window.setContentSize(760, 520);
+    await waitFor('document.getElementById("screen").scrollWidth <= document.getElementById("screen").clientWidth');
+    await js('document.getElementById("library-result").scrollIntoView({block:"start"})');
+    await capture('library-name-dedup-minimum.png');
+    window.setContentSize(1440, 900);
     await js('document.querySelector(".library-health > details").open=true; document.querySelector(".library-track").open=true; window.libraryAudio=document.getElementById("library-audio-0"); window.cueInput=document.getElementById("cue-0"); cueInput.value="2.5"; cueInput.focus(); document.getElementById("library-search").value="未确定"; document.getElementById("library-search").dispatchEvent(new Event("input",{bubbles:true})); workbenchTest.emitBatch({type:"log",message:"library editing stable"});');
     await waitFor('document.getElementById("run-logs").textContent.includes("library editing stable")');
     assert.equal(await js('libraryAudio === document.getElementById("library-audio-0") && cueInput === document.activeElement && cueInput.value === "2.5"'), true);

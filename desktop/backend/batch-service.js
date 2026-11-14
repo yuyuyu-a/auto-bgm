@@ -12,6 +12,7 @@ const { AUDIO_EXTENSIONS, DEFAULT_TRANSITION_FADE_SECONDS, VIDEO_EXTENSIONS, ass
 const { cachePath, filterLibrary, readLibrary, writeLibrary, reviewTrack } = require('../../src/music-library');
 const { publicStoryProfile } = require('../../src/story-music-plan');
 const { STORY_EXTENSIONS } = require('../../src/story-input');
+const { deduplicateMusic } = require('../../src/music-dedup');
 
 const DEFAULTS = {
   videos: '',
@@ -208,7 +209,12 @@ async function inspectBatch(input = {}) {
     return { episode, videoPath: sourceVideoPath, status: item.status || 'pending', staleArtifacts: staleStoryArtifacts(item), duration: Number.isFinite(Number(item.duration)) ? Number(item.duration) : null, mood: item.mood || '', moods: item.moods || [], trackCount: item.analysis?.trackCount, tracks: item.tracks || (item.track ? [item.track] : []), outputAudio: item.outputAudio !== false, outputVideo: item.outputVideo !== false, outputTimeline: item.outputTimeline !== false, outputTranscript: item.outputTranscript !== false, transcribe: item.transcribe === undefined ? Boolean(config.transcribe) : Boolean(item.transcribe), outputPath: item.outputAudio === false ? '' : item.outputPath || (output ? path.join(output, `${episode}_bgm.wav`) : ''), finalVideoPath: item.outputVideo === false ? '' : item.finalVideoPath || (output ? path.join(output, `${episode}_final${extension.toLowerCase()}`) : ''), timelinePath: item.outputTimeline === false ? '' : item.timelinePath || (output ? path.join(output, `${episode}_timeline.csv`) : ''), transcriptPath: item.outputTranscript === false ? '' : typeof item.transcriptPath === 'string' ? item.transcriptPath : output ? path.join(output, `${episode}_transcript.json`) : '', error: item.error || '', updatedAt: item.updatedAt || '' };
   });
   let musicGroups = [];
-  if (cleanPath(config.music)) try { const groups = await scanMusic(cleanPath(config.music)); musicGroups = [...groups.entries()].map(([mood, tracks]) => ({ mood, count: tracks.length })); } catch (error) { warning ||= error.message; }
+  let musicCount = 0;
+  if (cleanPath(config.music)) try {
+    const catalog = deduplicateMusic(await scanMusic(cleanPath(config.music)));
+    musicGroups = [...catalog.groups].map(([mood, tracks]) => ({ mood, count: tracks.length }));
+    musicCount = catalog.files.length;
+  } catch (error) { warning ||= error.message; }
   const model = await modelInfo(cleanPath(config.modelPath) || DEFAULTS.modelPath);
   const tools = await inspectTools(config);
   let validationError = '';
@@ -218,7 +224,7 @@ async function inspectBatch(input = {}) {
   const story = { enabled: config.storyEnabled === true,
     ready: typeof config.createStoryPlan === 'function' && paths.storyPath.status === 'available',
     profile: publicStoryProfile(config.storyAIProfile) };
-  return { config: { ...publicConfig, output }, story, state, summary, rows, warning, validationError, active: Boolean(activeRun), run: runSnapshot(), model, musicGroups, paths, tools, inputVideoCount: videos.length, inputVideos: videos, reportPath: output && await exists(path.join(output, 'run-report.md')) ? path.join(output, 'run-report.md') : '', errorLogPath: output && await exists(path.join(output, 'run-errors.log')) ? path.join(output, 'run-errors.log') : '' };
+  return { config: { ...publicConfig, output }, story, state, summary, rows, warning, validationError, active: Boolean(activeRun), run: runSnapshot(), model, musicGroups, musicCount, paths, tools, inputVideoCount: videos.length, inputVideos: videos, reportPath: output && await exists(path.join(output, 'run-report.md')) ? path.join(output, 'run-report.md') : '', errorLogPath: output && await exists(path.join(output, 'run-errors.log')) ? path.join(output, 'run-errors.log') : '' };
 }
 
 async function inspectTools(config) {
@@ -249,6 +255,7 @@ async function inspectLibrary(input, progress, signal) {
   try { groups = await scanMusic(music); } catch (error) { if (!error.message.startsWith('BGM 目录没有找到音频文件')) throw error; }
   const directories = (await fs.readdir(music, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
   const populatedDirectories = new Set([...groups.values()].flat().map((file) => path.relative(music, file).split(path.sep)[0]));
+  const catalog = deduplicateMusic(groups);
   const cached = await readLibrary(music, config);
   const healthState = { musicCatalog: cached.health || {} };
   const inspected = await inspectMusicCatalog(groups, config.ffprobe, config.ffmpeg, signal, healthState, true);
@@ -257,7 +264,7 @@ async function inspectLibrary(input, progress, signal) {
   library.health = healthState.musicCatalog;
   await writeLibrary(music, library, config);
   const hashes = new Map();
-  const duplicates = [];
+  const duplicates = [...inspected.duplicates];
   for (const entry of inspected.files) {
     signal?.throwIfAborted();
     try {
@@ -268,9 +275,9 @@ async function inspectLibrary(input, progress, signal) {
       else hashes.set(digest, entry.file);
     } catch { entry.playable = false; entry.reason = '文件无法读取'; }
   }
-  const musicGroups = [...groups].map(([mood, tracks]) => ({ mood, count: tracks.length, usable: tracks.filter((file) => inspected.files.find((entry) => entry.file === file)?.playable && vocal.metadata.get(file)?.eligible).length }));
+  const musicGroups = [...catalog.groups].map(([mood, tracks]) => ({ mood, count: tracks.length, usable: tracks.filter((file) => inspected.files.find((entry) => entry.file === file)?.playable && vocal.metadata.get(file)?.eligible).length }));
   const files = inspected.files.map((entry) => ({ ...vocal.metadata.get(entry.file), ...entry, reason: entry.reason || vocal.metadata.get(entry.file)?.reason || '', eligible: Boolean(entry.playable && vocal.metadata.get(entry.file)?.eligible), fileUrl: pathToFileURL(entry.file).href, tooShort: Number.isFinite(entry.duration) && entry.duration < 2 }));
-  return { total: inspected.checked, usable: files.filter((entry) => entry.eligible).length, playable: files.filter((entry) => entry.playable).length, counts: vocal.counts, strictInstrumental: config.strictInstrumental !== false, musicGroups, emptyDirectories: directories.filter((name) => !populatedDirectories.has(name)), unavailableMoods: musicGroups.filter((group) => !group.usable).map((group) => group.mood), duplicates, files, checkedAt: new Date().toISOString() };
+  return { total: inspected.checked, nameDuplicateCount: inspected.duplicates.length, usable: files.filter((entry) => entry.eligible).length, playable: files.filter((entry) => entry.playable).length, counts: vocal.counts, strictInstrumental: config.strictInstrumental !== false, musicGroups, emptyDirectories: directories.filter((name) => !populatedDirectories.has(name)), unavailableMoods: musicGroups.filter((group) => !group.usable).map((group) => group.mood), duplicates, files, checkedAt: new Date().toISOString() };
 }
 
 async function reviewMusicTrack(input = {}) {

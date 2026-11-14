@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { deduplicateMusic } = require('./music-dedup');
 
 const ANALYSIS_VERSION = 'yamnet-1-mediapipe-1.2.2-full-v3';
 // shortcut: thresholds calibrated on this library's initial samples; expand the labeled set before relaxing strict screening.
@@ -111,7 +112,8 @@ async function analyzeTrack(file, ffmpeg, classifier, signal) {
 
 async function filterLibrary(groups, options = {}, { analyze = false, signal, progress } = {}) {
   const library = await readLibrary(options.music, options);
-  const files = [...new Set([...groups.values()].flat())];
+  const catalog = deduplicateMusic(groups);
+  const files = catalog.files;
   let classifier;
   let initializationError;
   const modelPath = options.vocalModelPath || path.resolve(__dirname, '../runtime/audio/yamnet.tflite');
@@ -148,7 +150,7 @@ async function filterLibrary(groups, options = {}, { analyze = false, signal, pr
     }
   } finally { classifier?.close(); }
   const metadata = new Map(report.map((entry) => [entry.file, entry]));
-  const filtered = new Map([...groups].flatMap(([mood, tracks]) => { const allowed = tracks.filter((file) => metadata.get(file)?.eligible); return allowed.length ? [[mood, allowed]] : []; }));
+  const filtered = new Map([...catalog.groups].flatMap(([mood, tracks]) => { const allowed = tracks.filter((file) => metadata.get(file)?.eligible); return allowed.length ? [[mood, allowed]] : []; }));
   return { groups: filtered, files: report, metadata, counts: Object.fromEntries(['confirmed', 'instrumental', 'vocal', 'unknown', 'disabled'].map((status) => [status, report.filter((entry) => entry.status === status).length])) };
 }
 

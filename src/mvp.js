@@ -7,6 +7,7 @@ const { createHash } = require('node:crypto');
 const { cachePath, filterLibrary, readLibrary, writeLibrary, ANALYSIS_VERSION, ANALYSIS_SETTINGS, MODEL_SHA256 } = require('./music-library');
 const { assertStoryTranscript, buildStoryMusicPlan, publicStoryProfile } = require('./story-music-plan');
 const { loadStoryDocument, STORY_EXTENSIONS } = require('./story-input');
+const { deduplicateMusic } = require('./music-dedup');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
@@ -319,7 +320,8 @@ async function probeMedia(filePath, ffprobe, signal) {
   };
 }
 async function inspectMusicCatalog(groups, ffprobe, ffmpeg, signal, state, allowEmpty = false) {
-  const files = [...groups.values()].flatMap((tracks) => tracks);
+  const catalog = deduplicateMusic(groups);
+  const files = catalog.files;
   const checked = new Map();
   let cursor = 0;
   let skipped = 0;
@@ -366,12 +368,12 @@ async function inspectMusicCatalog(groups, ffprobe, ffmpeg, signal, state, allow
       if (!entry.playable) skipped += 1;
     }
   }));
-  const usableGroups = new Map([...groups].flatMap(([mood, tracks]) => {
+  const usableGroups = new Map([...catalog.groups].flatMap(([mood, tracks]) => {
     const usable = tracks.filter((file) => checked.get(file)?.playable);
     return usable.length ? [[mood, usable]] : [];
   }));
   if (!usableGroups.size && !allowEmpty) throw new Error('背景音乐目录中没有可用的非静音音轨，已检查 ' + files.length + ' 首并跳过 ' + skipped + ' 首');
-  return { groups: usableGroups, checked: files.length, skipped, files: [...checked].map(([file, entry]) => ({ file, ...entry })) };
+  return { groups: usableGroups, checked: files.length, skipped, duplicates: catalog.duplicates, files: [...checked].map(([file, entry]) => ({ file, ...entry })) };
 }
 
 function clamp(value, min, max) {
@@ -1389,6 +1391,7 @@ async function runBatch(options, logger = console) {
   const catalogSignature = createHash('sha256').update(JSON.stringify(catalogRows)).digest('hex');
   const results = [];
   logger.log('背景音乐检查完成：可用 ' + (inspected.checked - inspected.skipped) + ' 首，跳过无法解码或近似静音的 ' + inspected.skipped + ' 首');
+  if (inspected.duplicates.length) logger.log('已跳过同名音乐副本 ' + inspected.duplicates.length + ' 份，仅分析和使用每个文件名的一份音乐；原文件保留。');
   logger.log('视频 ' + videos.length + ' 集，BGM ' + [...groups.entries()].map(([mood, tracks]) => mood + ':' + tracks.length).join(' / '));
 
   for (let index = 0; index < videos.length; index += 1) {
@@ -1429,7 +1432,7 @@ async function runBatch(options, logger = console) {
   const summary = {
     generatedAt: new Date().toISOString(),
     analysisVersion: PLANNING_VERSION,
-    library: { ...library.counts, elapsedMs: libraryElapsedMs, strictInstrumental: options.strictInstrumental !== false, vocalVersion: ANALYSIS_VERSION },
+    library: { ...library.counts, nameDuplicateCount: inspected.duplicates.length, elapsedMs: libraryElapsedMs, strictInstrumental: options.strictInstrumental !== false, vocalVersion: ANALYSIS_VERSION },
     videos: videos.length,
     completed: results.filter((item) => item.status === 'completed').length,
     skipped: results.filter((item) => item.status === 'skipped').length,
