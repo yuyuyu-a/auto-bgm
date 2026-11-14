@@ -52,13 +52,13 @@ Interfaces: committed source SHA -> `v1.0.2` tag -> draft release with three ass
 -> verified latest stable release. Keep authentication only in the existing keyring.
 
 - [x] Check staged paths and credential-pattern scan before committing.
-- [ ] Commit/push matching source to `main`; tag the tested commit `v1.0.2`.
-- [ ] Create a draft with `gh release create v1.0.2 --draft --verify-tag`.
-- [ ] Upload `auto-bgm-setup-1.0.2.exe`, its `.blockmap`, and `latest.yml`.
-- [ ] Compare remote asset sizes/digests with local SHA-256 results.
-- [ ] Publish with `gh release edit v1.0.2 --draft=false --latest`.
-- [ ] Check public-provider discovery from an older version without auto-download.
-- [ ] Report actual published version, verification and local installation status.
+- [x] Commit/push matching source to `main`; tag the tested commit `v1.0.2`.
+- [x] Create a draft with `gh release create v1.0.2 --draft --verify-tag`.
+- [x] Upload `auto-bgm-setup-1.0.2.exe`, its `.blockmap`, and `latest.yml`.
+- [x] Compare remote asset sizes/digests with local SHA-256 results.
+- [x] Publish with `gh release edit v1.0.2 --draft=false --latest`.
+- [x] Check public-provider discovery from an older version without auto-download.
+- [x] Report actual published version, verification and local installation status.
 
 ## Verification Log
 
@@ -88,3 +88,15 @@ Interfaces: committed source SHA -> `v1.0.2` tag -> draft release with three ass
 - Independent review approved the final production changes. Modal keyboard,
   digest/range and public-provider findings were closed; a final validator-only
   check rejects multiple NSIS blockmap entries, matching the bundled downloader.
+- Published source/tag commit:
+  `397131d807b947e2da894e65469dce8fe7226f5b`.
+- All three draft assets were uploaded and compared with local sizes and SHA-256
+  digests before publication. Release `445371787` became the latest stable
+  `v1.0.2` at `2026-11-14T15:05:33Z`.
+- `electron tools/check-published-update.cjs --expected=1.0.2 --from=1.0.1`
+  passed against the real public GitHub provider. Installer metadata reports
+  689215200 bytes; the check did not download or install anything.
+- The installed desktop executable remains version `1.0.1.0`. The user can
+  upgrade once through About -> Check for updates; the new dialog is available
+  after installing 1.0.2. Future reminders require a published release, not just
+  a source push.
