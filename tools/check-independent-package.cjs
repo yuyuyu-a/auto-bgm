@@ -18,7 +18,7 @@ app.whenReady().then(async () => {
   const source = path.join(resources, 'app.asar');
   const packaged = require(path.join(source, 'package.json'));
   assert.equal(packaged.name, 'auto-bgm');
-  assert.equal(packaged.version, '1.0.0');
+  assert.equal(packaged.version, require('../package.json').version);
   assert.notEqual(packaged.bgmPreview, true);
   const config = await fs.readFile(path.join(resources, 'app-update.yml'), 'utf8');
   assert.match(config, /owner: yuyuyu-a/);
@@ -30,7 +30,7 @@ app.whenReady().then(async () => {
   for (const file of [
     'desktop/main.js', 'desktop/preload.js', 'desktop/update-cache.js',
     'desktop/update-service.js', 'desktop/story-ai-settings.js',
-    'desktop/renderer/index.html', 'desktop/renderer/renderer.js',
+    'desktop/renderer/index.html', 'desktop/renderer/renderer.js', 'desktop/renderer/styles.css',
     'desktop/backend/batch-service.js', 'src/mvp.js', 'src/story-director.js',
   ]) {
     assert.equal(await fs.readFile(path.join(source, file), 'utf8'),
@@ -132,7 +132,7 @@ app.whenReady().then(async () => {
   const defaults = { videos: video, music, output, transcribe: false,
     minTracksPerEpisode: 1, maxTracksPerEpisode: 17, scenePriority: false };
   await fs.writeFile(path.join(temporary, 'fixture.json'), JSON.stringify({
-    info: { defaults, running: false, version: '1.0.0', logs: [] },
+    info: { defaults, running: false, version: packaged.version, logs: [] },
     batch: { rows: [], inputVideoCount: 1, musicGroups: [{ mood: '默认', count: 1 }],
       paths: Object.fromEntries(['videos', 'music', 'output'].map((key) => [key, { status: 'available' }])),
       model: { exists: true }, tools: { ffmpeg: { available: true }, ffprobe: { available: true } } },
@@ -165,7 +165,7 @@ app.whenReady().then(async () => {
     window.destroy();
   }
   console.log('INDEPENDENT_PACKAGE_OK', JSON.stringify({
-    product: '自动配乐', version: '1.0.0', ownUpdateFeed: true,
+    product: '自动配乐', version: packaged.version, ownUpdateFeed: true,
     realTranscription: true, localRequests: requests, silenceSamplesZero: true,
     isolatedEncryptedSettings: true, screenshots: fixture,
   }));

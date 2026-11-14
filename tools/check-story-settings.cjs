@@ -1,0 +1,102 @@
+'use strict';
+
+const { app, BrowserWindow } = require('electron');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const http = require('node:http');
+
+const root = require('node:fs').mkdtempSync(path.join(os.tmpdir(), 'auto-bgm-settings-'));
+app.setPath('appData', root);
+app.setPath('userData', path.join(root, 'profile'));
+app.disableHardwareAcceleration();
+app.on('browser-window-created', (_event, window) => window.hide());
+
+const source = process.argv.includes('--installed')
+  ? path.join(process.env.LOCALAPPDATA, 'Programs/auto-bgm/resources/app.asar')
+  : process.argv.includes('--packaged')
+    ? path.resolve(__dirname, '../release/win-unpacked/resources/app.asar')
+    : path.resolve(__dirname, '..');
+const requests = [];
+const server = http.createServer((request, response) => {
+  requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization });
+  response.setHeader('content-type', 'application/json');
+  if (request.method !== 'GET' || !['/v1/models', '/alternate/v1/models'].includes(request.url)) {
+    response.writeHead(404);
+    response.end(JSON.stringify({ error: { message: 'Unexpected fixture route' } }));
+    return;
+  }
+  response.end(JSON.stringify({ data: [{ id: 'fixture-director' }, { id: 'fixture-backup' }] }));
+});
+
+require(path.join(source, 'desktop/main.js'));
+
+app.whenReady().then(async () => {
+  let window;
+  let exitCode = 1;
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    window = BrowserWindow.getAllWindows()[0];
+    assert.ok(window, 'The real desktop main process must create its window');
+    const js = (script) => window.webContents.executeJavaScript(script, true);
+    const wait = async (script) => {
+      const until = Date.now() + 10000;
+      while (Date.now() < until) {
+        if (await js(script)) return;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      throw new Error(`Timed out: ${script}`);
+    };
+    await wait('typeof state !== "undefined" && state.version && !state.preflightPending');
+    await js('document.querySelector(".nav-item[data-view=settings]").click()');
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const key = 'local-settings-fixture-only';
+    await js(`document.getElementById("story-ai-base-url").value = ${JSON.stringify(baseUrl)};
+      document.getElementById("story-ai-model").value = "fixture-director";
+      document.getElementById("story-ai-key").value = ${JSON.stringify(key)};
+      document.querySelector("[data-action=story-ai-models]").click()`);
+    await wait('!state.storyAIBusy');
+    assert.equal(await js('state.storyModels.length'), 2,
+      'Getting models after entering API settings must use the current form, not empty saved settings');
+    assert.equal(await js('state.storyAI.keyStored'), true);
+    assert.equal(await js('document.getElementById("story-ai-key").value'), '');
+    assert.deepEqual(requests, [{ method: 'GET', url: '/v1/models', authorization: `Bearer ${key}` }]);
+    console.log('PASS: first-use model discovery saves the current form through real IPC');
+
+    const settingsPath = path.join(root, 'auto-bgm/story-ai.json');
+    assert.equal((await fs.readFile(settingsPath, 'utf8')).includes(key), false);
+    assert.equal(await js(`JSON.stringify(localStorage).includes(${JSON.stringify(key)})`), false);
+    await js(`document.getElementById("story-ai-base-url").value = ${JSON.stringify(`${baseUrl}/alternate`)};
+      document.getElementById("story-ai-model").value = "fixture-backup";
+      document.querySelector("[data-action=test-story-ai]").click()`);
+    await wait('!state.storyAIBusy');
+    assert.equal(await js('document.getElementById("toast").textContent'), '连接正常');
+    assert.equal(requests.at(-1).url, '/alternate/v1/models');
+    assert.equal(requests.at(-1).authorization, `Bearer ${key}`);
+    assert.equal(await js('state.storyAI.model'), 'fixture-backup');
+    console.log('PASS: connection check uses edited settings and preserves an existing encrypted key');
+
+    const screenshots = path.resolve(__dirname, '../build/ux-verification');
+    await fs.mkdir(screenshots, { recursive: true });
+    await js('document.querySelector(".story-ai-settings").scrollIntoView()');
+    await fs.writeFile(path.join(screenshots, 'api-settings-desktop.png'),
+      (await window.webContents.capturePage()).toPNG());
+    window.setContentSize(760, 520);
+    await js('document.querySelector(".story-ai-settings").scrollIntoView()');
+    assert.equal(await js('screen.scrollWidth <= screen.clientWidth'), true);
+    assert.equal(await js('[...document.querySelectorAll(".story-ai-settings button")].every(node => node.scrollWidth <= node.clientWidth)'), true);
+    await fs.writeFile(path.join(screenshots, 'api-settings-minimum.png'),
+      (await window.webContents.capturePage()).toPNG());
+    assert.equal(requests.every(({ method, url }) => method === 'GET' && url.endsWith('/models')), true);
+    console.log('PASS: native encryption, desktop/minimum layout, and no completion requests');
+    exitCode = 0;
+  } catch (error) {
+    console.error(error);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    window?.destroy();
+    app.exit(exitCode);
+  }
+});

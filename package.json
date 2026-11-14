@@ -1,6 +1,6 @@
 {
   "name": "auto-bgm",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "private": true,
   "description": "Story-aware automatic background music for videos.",
   "author": "yuyuyu-a",

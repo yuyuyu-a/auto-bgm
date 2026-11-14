@@ -6,6 +6,7 @@ const toastNode = document.getElementById('toast');
 const topTitle = document.getElementById('top-title');
 const topStart = document.getElementById('top-start');
 const sidebarRuntime = document.getElementById('sidebar-runtime');
+const updateNoticeDialog = document.getElementById('update-notice-dialog');
 
 const state = {
   view: 'desk',
@@ -41,6 +42,9 @@ const state = {
 };
 
 const UPDATE_SEEN_KEY = 'bgm-studio-update-seen';
+const UPDATE_ACKNOWLEDGED_KEY = 'bgm-studio-update-acknowledged';
+const acknowledgedUpdates = new Set(loadAcknowledgedUpdates());
+let updateNoticeReady = false;
 let refreshSequence = 0;
 let refreshTimer;
 let liveTimer;
@@ -259,11 +263,57 @@ function loadSeenUpdate() {
   try { return localStorage.getItem(UPDATE_SEEN_KEY) || ''; } catch { return ''; }
 }
 
-function markUpdateSeen() {
-  if (!state.update.version) return;
-  state.updateSeenVersion = state.update.version;
+function markUpdateSeen(version = state.update.version) {
+  if (!version) return;
+  state.updateSeenVersion = version;
   try { localStorage.setItem(UPDATE_SEEN_KEY, state.updateSeenVersion); } catch { /* local-only convenience */ }
 }
+
+function loadAcknowledgedUpdates() {
+  try {
+    const versions = JSON.parse(localStorage.getItem(UPDATE_ACKNOWLEDGED_KEY) || '[]');
+    return Array.isArray(versions) ? versions.filter((version) => typeof version === 'string') : [];
+  } catch { return []; }
+}
+
+function acknowledgeUpdate(version) {
+  if (!version) return;
+  acknowledgedUpdates.add(version);
+  try { localStorage.setItem(UPDATE_ACKNOWLEDGED_KEY, JSON.stringify([...acknowledgedUpdates])); } catch { /* local-only convenience */ }
+  markUpdateSeen(version);
+}
+
+function dismissUpdateNotice() {
+  acknowledgeUpdate(updateNoticeDialog.dataset.version);
+  updateNoticeDialog.close();
+  renderChrome();
+}
+
+function reconsiderUpdateNotice() {
+  const update = state.update;
+  const available = update.enabled === true && update.status === 'available'
+    && typeof update.version === 'string' && update.version.trim();
+  const idle = updateNoticeReady && !state.preflightPending && !state.running && !state.starting
+    && !state.checkingLibrary && !state.storyAIBusy
+    && !document.querySelector('dialog[open]:not(#update-notice-dialog)');
+  if (!available || !idle || acknowledgedUpdates.has(update.version)) {
+    if (updateNoticeDialog.open) updateNoticeDialog.close();
+    return;
+  }
+  updateNoticeDialog.dataset.version = update.version;
+  const version = document.getElementById('update-notice-version');
+  const notes = document.getElementById('update-notice-notes');
+  version.textContent = `v${update.version}`;
+  const text = update.releaseNotes || '本次更新包含稳定性改进。';
+  if (notes.textContent !== text) notes.textContent = text;
+  if (!updateNoticeDialog.open) updateNoticeDialog.showModal();
+}
+
+updateNoticeDialog.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  dismissUpdateNotice();
+});
+document.addEventListener('close', reconsiderUpdateNotice, true);
 
 function hasUnreadUpdate() {
   return state.update.status === 'available' && Boolean(state.update.version) && state.updateSeenVersion !== state.update.version;
@@ -433,15 +483,22 @@ function renderStoryAISettings() {
 async function storyAIAction(action) {
   if (state.storyAIBusy || state.running || state.starting) return;
   const keyInput = document.getElementById('story-ai-key');
-  const input = action === 'save-story-ai' ? {
+  const input = action === 'clear-story-ai-key' ? { clearKey: true } : {
     baseUrl: document.getElementById('story-ai-base-url').value.trim(),
     model: document.getElementById('story-ai-model').value.trim(),
     apiKey: keyInput.value,
-  } : { clearKey: true };
+  };
   if (keyInput) keyInput.value = '';
   state.storyAIBusy = true;
-  document.querySelectorAll('.story-ai-settings button').forEach((node) => { node.disabled = true; });
+  document.querySelectorAll('.story-ai-settings input, .story-ai-settings button').forEach((node) => { node.disabled = true; });
   try {
+    applyStoryAIProfile(await api.saveStoryAISettings(input));
+    state.storyModels = [];
+    await refresh(true, true);
+    if (state.view === 'settings') {
+      const section = document.querySelector('.story-ai-settings');
+      if (section) section.outerHTML = renderStoryAISettings();
+    }
     if (action === 'story-ai-models') {
       const models = await api.storyAIModels();
       state.storyModels = models.filter((model) => typeof model === 'string');
@@ -451,13 +508,6 @@ async function storyAIAction(action) {
       await api.testStoryAI();
       showToast('连接正常');
     } else {
-      applyStoryAIProfile(await api.saveStoryAISettings(input));
-      state.storyModels = [];
-      await refresh(true, true);
-      if (state.view === 'settings') {
-        const section = document.querySelector('.story-ai-settings');
-        if (section) section.outerHTML = renderStoryAISettings();
-      }
       showToast(action === 'clear-story-ai-key' ? '密钥已删除' : 'API 设置已保存');
     }
   } catch {
@@ -468,6 +518,7 @@ async function storyAIAction(action) {
       node.disabled = state.running || state.starting || !api.saveStoryAISettings
         || (node.dataset.action === 'clear-story-ai-key' && !state.storyAI.keyStored);
     });
+    reconsiderUpdateNotice();
   }
 }
 
@@ -631,6 +682,7 @@ function renderChrome() {
     aboutNav.querySelector('.update-dot')?.classList.toggle('visible', hasUnreadUpdate());
   }
   sidebarRuntime.textContent = state.running ? '批次运行中 · 可中断' : state.data.rows.length ? '已读取上次批次状态' : '离线链路待启动';
+  reconsiderUpdateNotice();
 }
 
 function render(preserveScroll = false) {
@@ -673,6 +725,8 @@ function render(preserveScroll = false) {
 
 async function startBatch(runMode = 'all') {
   if (state.running || state.starting) return;
+  state.starting = true;
+  updateLive();
   try {
     await refresh(true, true);
     if (state.preflightPending || state.data.warning || preflightChecks().some((check) => !check.ok)) {
@@ -685,8 +739,6 @@ async function startBatch(runMode = 'all') {
     if (runMode === 'episode' && !current?.videoPath) return showToast('请先选择可访问的视频', true);
     if (runMode === 'episode' && !window.confirm(`重新生成“${current.episode}”？仅替换本程序为该集创建的产物，仍保护同名手工文件；原始视频和音乐不会修改。`)) return;
     if (runMode === 'all' && state.config.overwrite && !window.confirm('已开启允许覆盖：本次队列的同名输出可能被替换。原始素材不会修改，是否继续？')) return;
-    state.starting = true;
-    updateLive();
     rememberPaths();
     const result = await api.startBatch({ ...state.config, runMode, ...(runMode === 'all' ? {} : { overwrite: false }), ...(runMode === 'episode' ? { episodeVideoPath: current.videoPath } : {}) });
     if (result.run && (!state.run || state.run.startedAt < result.run.startedAt)) state.run = result.run;
@@ -808,9 +860,15 @@ document.addEventListener('click', async (event) => {
       showToast('正在检查更新…');
       render();
     } else if (action === 'download-update') {
+      acknowledgeUpdate(updateNoticeDialog.open ? updateNoticeDialog.dataset.version : state.update.version);
+      updateNoticeDialog.close();
+      state.view = 'about';
+      render();
       applyUpdateState(await api.downloadUpdate());
       showToast('正在下载更新…');
       render();
+    } else if (action === 'later-update') {
+      dismissUpdateNotice();
     } else if (action === 'cancel-update') {
       applyUpdateState(await api.cancelUpdate());
       showToast('已取消下载更新');
@@ -1036,6 +1094,7 @@ document.addEventListener('input', (event) => {
 });
 
 document.addEventListener('keydown', async (event) => {
+  if (document.querySelector('dialog[open]')) return;
   if (![' ', 'ArrowLeft', 'ArrowRight'].includes(event.key) || event.target.closest('input, textarea, select, button, a, audio, video, [contenteditable]') || !['timeline', 'transcript'].includes(state.view)) return;
   const media = activeMedia();
   if (!media) return;
@@ -1132,6 +1191,8 @@ api.onUpdateEvent((update) => {
     } catch { state.recentPaths = {}; }
     if (state.bundledRuntime) Object.assign(state.config, { modelPath: state.defaults.modelPath, ffmpeg: state.defaults.ffmpeg, ffprobe: state.defaults.ffprobe });
     await refresh(true);
+    updateNoticeReady = true;
+    reconsiderUpdateNotice();
   } catch (error) {
     showToast(error.message, true);
     render();

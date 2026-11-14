@@ -28,6 +28,12 @@
     </main>
   </div>
   <div id="toast" class="toast" role="status"></div>
+  <dialog id="update-notice-dialog" aria-labelledby="update-notice-title" aria-describedby="update-notice-version update-notice-notes">
+    <h2 id="update-notice-title">发现新版本</h2>
+    <p id="update-notice-version" class="update-version"></p>
+    <div id="update-notice-notes" class="update-notice-notes" tabindex="0"></div>
+    <div class="update-actions"><button class="button ghost" data-action="later-update" autofocus>稍后</button><button class="button primary" data-action="download-update">下载更新</button></div>
+  </dialog>
   <dialog id="diagnostics-dialog" aria-labelledby="diagnostics-title"><h2 id="diagnostics-title">诊断信息预览</h2><p>已省略私人路径、素材文件名、转录内容和原始错误文本。</p><label for="diagnostic-text">将复制的内容</label><textarea id="diagnostic-text" readonly></textarea><div class="header-actions"><button class="button primary" id="copy-diagnostics" data-action="copy-diagnostics">复制脱敏信息</button><button class="button ghost" data-action="close-diagnostics">关闭</button></div></dialog>
   <script src="./renderer.js"></script>
 </body>
