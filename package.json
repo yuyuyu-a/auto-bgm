@@ -1,0 +1,101 @@
+{
+  "name": "auto-bgm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Story-aware automatic background music for videos.",
+  "author": "yuyuyu-a",
+  "license": "MIT",
+  "homepage": "https://github.com/yuyuyu-a/auto-bgm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yuyuyu-a/auto-bgm.git"
+  },
+  "main": "desktop/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test",
+    "test:desktop-ui": "electron tools/check-workbench.cjs",
+    "desktop": "electron .",
+    "start:desktop": "electron .",
+    "dist:win": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows.ps1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "electron": "^45.2.2",
+    "electron-builder": "^26.18.1"
+  },
+  "build": {
+    "appId": "com.yuyuyua.autobgm",
+    "productName": "自动配乐",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime/audio",
+        "to": "audio"
+      },
+      {
+        "from": "runtime/transcriber/bgm-transcriber",
+        "to": "transcriber"
+      },
+      {
+        "from": "runtime/ffmpeg",
+        "to": "ffmpeg"
+      },
+      {
+        "from": "runtime/model/small",
+        "to": "model/small"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "licenses/THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "LICENSE",
+        "to": "licenses/LICENSE"
+      },
+      {
+        "from": "licenses",
+        "to": "licenses"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "artifactName": "auto-bgm-setup-${version}.${ext}",
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "自动配乐",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "yuyuyu-a",
+      "repo": "auto-bgm"
+    },
+    "electronDist": "node_modules/electron/dist"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-audio": "1.2.2",
+    "electron-updater": "6.8.12",
+    "mammoth": "1.13.0"
+  }
+}
