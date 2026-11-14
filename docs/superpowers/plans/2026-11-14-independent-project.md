@@ -59,10 +59,28 @@ Files: `package.json`, `package-lock.json`, `desktop/main.js`,
 ## Task 4: Publish the Standalone Repository and Release
 
 - [x] Scan the final source and packaged application for accidental credentials.
-- [ ] Initialize a fresh Git repository on `main` and commit the tested source.
-- [ ] Create `yuyuyu-a/auto-bgm` as a standalone public repository.
-- [ ] Push `main`; create a draft `v1.0.0` release from that exact commit.
-- [ ] Upload installer, matching blockmap and `latest.yml`; publish only after
+- [x] Initialize a fresh Git repository on `main` and commit the tested source.
+- [x] Create `yuyuyu-a/auto-bgm` as a standalone public repository.
+- [x] Push `main`; create a draft `v1.0.0` release from that exact commit.
+- [x] Upload installer, matching blockmap and `latest.yml`; publish only after
   all uploads complete.
-- [ ] Verify `fork=false`, default branch, release tag, uploaded asset sizes and
+- [x] Verify `fork=false`, default branch, release tag, uploaded asset sizes and
   GitHub asset digests. Return the user's new download page.
+
+## Completion Evidence
+
+- Repository: `yuyuyu-a/auto-bgm`, public, `fork=false`, default branch `main`.
+- Tested source and release tag: `5f228d787f3725fdf9aefff900c9ac898ef35ae8`.
+  Both remote `main` and `v1.0.0` were checked at that commit before this
+  documentation-only completion record was added.
+- Published stable release `v1.0.0`, not draft or prerelease.
+- Installer: 689,214,166 bytes.
+- Installer SHA-256:
+  `d6736857a4160e507f66549bedf911ad00a51e61f198b244d085a9a90e6750a5`.
+- GitHub SHA-256 digests and sizes matched all three local release assets.
+- Actual packaged EXE launch: title "自动配乐", version `1.0.0`,
+  `updateEnabled=true`; isolated profile used and process exited.
+- Packaged local HTTP fixture, real English transcription, output decode,
+  explicit-silence samples, encrypted temporary settings, nested library, and
+  custom numeric-limit checks passed. No paid provider request was made.
+- Original checkout and original GitHub fork were not changed.
