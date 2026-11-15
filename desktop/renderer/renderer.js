@@ -39,6 +39,7 @@ const state = {
   storyAI: { baseUrl: '', model: '', keyStored: false },
   storyModels: [],
   storyAIBusy: false,
+  storyAIEditingKey: false,
 };
 
 const UPDATE_SEEN_KEY = 'bgm-studio-update-seen';
@@ -466,6 +467,27 @@ function applyStoryAIProfile(profile) {
     model: typeof profile?.model === 'string' ? profile.model : '',
     keyStored: profile?.keyStored === true,
   };
+  state.storyAIEditingKey = false;
+}
+
+function renderStoryAIKey(disabled) {
+  const saved = state.storyAI.keyStored && !state.storyAIEditingKey;
+  return `<label for="${saved ? 'story-ai-replace-key' : 'story-ai-key'}">API 密钥</label>
+    ${saved ? `<div id="story-ai-key-saved" class="story-ai-saved-key" role="group" aria-label="已保存的 API 密钥">
+      <span class="story-ai-key-mask" aria-hidden="true">********</span><span class="story-ai-key-state">已保存</span>
+      <button id="story-ai-replace-key" class="button ghost compact" data-action="replace-story-ai-key" ${disabled ? 'disabled' : ''}>更换</button>
+    </div>` : ''}
+    <div class="story-ai-key-entry" ${saved ? 'hidden' : ''}>
+      <input id="story-ai-key" class="text-input" type="password" value="" autocomplete="new-password" spellcheck="false" aria-label="${state.storyAI.keyStored ? '新的 API 密钥' : 'API 密钥'}" placeholder="${state.storyAI.keyStored ? '输入新的密钥' : '未保存'}" ${saved ? 'hidden' : ''} ${disabled ? 'disabled' : ''}>
+      ${state.storyAI.keyStored && !saved ? `<button class="button ghost compact" data-action="cancel-story-ai-key" ${disabled ? 'disabled' : ''}>取消</button>` : ''}
+    </div>`;
+}
+
+function editStoryAIKey(editing) {
+  if (state.storyAIBusy || state.running || state.starting || !state.storyAI.keyStored) return;
+  state.storyAIEditingKey = editing;
+  document.getElementById('story-ai-key-field').innerHTML = renderStoryAIKey(!api.saveStoryAISettings);
+  document.getElementById(editing ? 'story-ai-key' : 'story-ai-replace-key').focus();
 }
 
 function renderStoryAISettings() {
@@ -476,7 +498,7 @@ function renderStoryAISettings() {
     <div class="story-ai-fields">
       <div class="field"><label for="story-ai-base-url">API 地址</label><input id="story-ai-base-url" class="text-input" type="url" value="${escapeHtml(state.storyAI.baseUrl)}" placeholder="HTTPS API 地址" autocomplete="off" spellcheck="false" ${disabled ? 'disabled' : ''}></div>
       <div class="field"><label for="story-ai-model">模型</label><input id="story-ai-model" class="text-input" list="story-ai-models" value="${escapeHtml(state.storyAI.model)}" autocomplete="off" spellcheck="false" ${disabled ? 'disabled' : ''}><datalist id="story-ai-models">${state.storyModels.map((model) => `<option value="${escapeHtml(model)}"></option>`).join('')}</datalist></div>
-      <div class="field"><label for="story-ai-key">API 密钥</label><input id="story-ai-key" class="text-input" type="password" value="" autocomplete="new-password" spellcheck="false" placeholder="${state.storyAI.keyStored ? '留空保留已存密钥' : '未保存'}" ${disabled ? 'disabled' : ''}></div>
+      <div class="field" id="story-ai-key-field">${renderStoryAIKey(disabled)}</div>
     </div>
     <div class="story-ai-actions"><button class="button" data-action="save-story-ai" ${disabled ? 'disabled' : ''}>保存</button><button class="button ghost" data-action="story-ai-models" ${disabled || !api.storyAIModels ? 'disabled' : ''}>获取模型</button><button class="button ghost" data-action="test-story-ai" ${disabled || !api.testStoryAI ? 'disabled' : ''}>检测连接</button><button class="button ghost" data-action="clear-story-ai-key" ${disabled || !state.storyAI.keyStored ? 'disabled' : ''}>删除密钥</button></div>
   </section>`;
@@ -688,6 +710,7 @@ function renderChrome() {
 }
 
 function render(preserveScroll = false) {
+  if (state.view !== 'settings') state.storyAIEditingKey = false;
   const scrollTop = screen.scrollTop;
   const transcriptScrollTop = screen.querySelector('.transcript-scroll')?.scrollTop;
   const focused = screen.contains(document.activeElement) ? document.activeElement : null;
@@ -884,6 +907,8 @@ document.addEventListener('click', async (event) => {
       await api.openUpdatePage();
     } else if (action === 'toggle-maximize') {
       await api.toggleMaximize();
+    } else if (action === 'replace-story-ai-key' || action === 'cancel-story-ai-key') {
+      editStoryAIKey(action === 'replace-story-ai-key');
     } else if (['save-story-ai', 'clear-story-ai-key', 'story-ai-models', 'test-story-ai'].includes(action)) {
       await storyAIAction(action);
     } else if (action === 'start') {
