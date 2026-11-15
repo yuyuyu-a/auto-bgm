@@ -34,8 +34,9 @@ app.whenReady().then(async () => {
     'desktop/backend/batch-service.js', 'src/mvp.js', 'src/story-director.js',
     'src/music-dedup.js', 'src/music-library.js',
   ]) {
-    assert.equal(await fs.readFile(path.join(source, file), 'utf8'),
-      await fs.readFile(path.join(repository, file), 'utf8'), `Packaged source mismatch: ${file}`);
+    // Git may normalize working-tree newlines after switching branches.
+    assert.equal((await fs.readFile(path.join(source, file), 'utf8')).replace(/\r\n/g, '\n'),
+      (await fs.readFile(path.join(repository, file), 'utf8')).replace(/\r\n/g, '\n'), `Packaged source mismatch: ${file}`);
   }
   const fixture = await fs.mkdtemp(path.join(repository, 'build/independent-package-'));
   const video = path.join(fixture, 'episode.mp4');
