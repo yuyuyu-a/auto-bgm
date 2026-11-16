@@ -32,7 +32,7 @@ app.whenReady().then(async () => {
     'desktop/update-service.js', 'desktop/story-ai-settings.js',
     'desktop/renderer/index.html', 'desktop/renderer/renderer.js', 'desktop/renderer/styles.css',
     'desktop/backend/batch-service.js', 'src/mvp.js', 'src/story-director.js',
-    'src/music-dedup.js', 'src/music-library.js',
+    'src/music-dedup.js', 'src/music-library.js', 'src/music-selection.js', 'src/story-music-plan.js',
   ]) {
     // Git may normalize working-tree newlines after switching branches.
     assert.equal((await fs.readFile(path.join(source, file), 'utf8')).replace(/\r\n/g, '\n'),
@@ -57,7 +57,7 @@ app.whenReady().then(async () => {
 
   const { createStoryAISettings } = require(path.join(source, 'desktop/story-ai-settings'));
   const { requestStoryPlan } = require(path.join(source, 'src/story-director'));
-  const { runBatch, scanMusic } = require(path.join(source, 'src/mvp'));
+  const { buildMusicPlan, runBatch, scanMusic } = require(path.join(source, 'src/mvp'));
   const { checkMusicLibrary, inspectBatch } = require(path.join(source, 'desktop/backend/batch-service'));
   const dedupMusic = path.join(fixture, 'same-name-music');
   const representative = path.join(dedupMusic, 'album2', 'theme.wav');
@@ -79,6 +79,21 @@ app.whenReady().then(async () => {
   assert.equal((await inspectBatch(dedupOptions)).musicCount, 1);
   assert.equal([...((await scanMusic(dedupMusic)).values())].flat().length, 2);
   assert.equal(await fs.readFile(duplicate, 'utf8'), 'invalid audio: same-name copies must not be decoded');
+  const lyricalMusic = path.join(fixture, 'lyrical-music');
+  const lyricalTrack = path.join(lyricalMusic, '音乐合集', '03_抒情', '第二辑', 'lyrical.wav');
+  await fs.mkdir(path.dirname(lyricalTrack), { recursive: true });
+  await fs.copyFile(path.join(music, 'fixture.wav'), lyricalTrack);
+  const lyricalGroups = await scanMusic(lyricalMusic);
+  assert.deepEqual([...lyricalGroups.keys()], ['03_抒情']);
+  for (const mood of ['浪漫', '温情']) {
+    const result = buildMusicPlan({ duration: 30, groups: lyricalGroups, trackUses: new Map(),
+      options: { mood, scenePriority: false } });
+    assert.equal(result.segments[0].track, lyricalTrack);
+    assert.equal(result.segments[0].requestedMood, mood);
+    assert.equal(result.segments[0].selectedMood, '03_抒情');
+    assert.equal(result.segments[0].matchType, 'similar');
+    assert.equal(result.segments[0].review, true);
+  }
   let requests = 0;
   let providerError;
   const server = http.createServer(async (request, response) => {
@@ -190,7 +205,8 @@ app.whenReady().then(async () => {
   console.log('INDEPENDENT_PACKAGE_OK', JSON.stringify({
     product: '自动配乐', version: packaged.version, ownUpdateFeed: true,
     realTranscription: true, localRequests: requests, silenceSamplesZero: true,
-    isolatedEncryptedSettings: true, sameNameDedupBeforeDecode: true, screenshots: fixture,
+    isolatedEncryptedSettings: true, sameNameDedupBeforeDecode: true,
+    nestedLyricalSubstitution: true, screenshots: fixture,
   }));
   app.quit();
 }).catch((error) => {
