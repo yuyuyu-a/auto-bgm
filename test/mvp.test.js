@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 const ffmpeg = process.env.FFMPEG || 'ffmpeg';
 const ffprobe = process.env.FFPROBE || 'ffprobe';
 
-test('neutral silence renders safely and legacy completion can resume with an empty strict pool', async (t) => {
+test('restrained fallback renders music and legacy completion can resume with an empty strict pool', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-silence-legacy-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const music = path.join(root, 'music');
@@ -26,7 +26,9 @@ test('neutral silence renders safely and legacy completion can resume with an em
   const logger = { log() {}, error() {} };
   const first = await runBatch(options, logger);
   assert.equal(first.completed, 1);
-  assert.deepEqual(first.results[0].tracks, [null]);
+  assert.deepEqual(first.results[0].tracks, [track]);
+  assert.equal(first.results[0].analysis.segments[0].matchType, 'library');
+  assert.ok(await wavRms(first.results[0].outputPath, 0.2, 0.6) > 0.001);
   assert.equal(first.results[0].analysis.ducking.enabled, false);
   assert.equal((await runBatch(options, logger)).skipped, 1);
   const stateFile = path.join(options.output, '.mvp-state.json');
@@ -40,6 +42,45 @@ test('neutral silence renders safely and legacy completion can resume with an em
   const rejected = await runBatch({ ...options, strictInstrumental: true, skipCompleted: false, vocalModelPath: path.join(root, 'missing.tflite') }, logger);
   assert.equal(rejected.failed, 1);
   assert.match(rejected.results[0].error, /纯音乐筛选条件/);
+});
+
+test('old accidental silence is flagged for regeneration without rewriting owned or manual outputs', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-old-silent-plan-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const music = path.join(root, 'music');
+  await fs.mkdir(path.join(music, '温情'), { recursive: true });
+  await makeAudio(path.join(music, '温情', 'warm.wav'), 440);
+  const videos = path.join(root, 'episode.mp4');
+  await makeVideo(videos);
+  const options = { music, videos, output: path.join(root, 'output'), ffmpeg, ffprobe,
+    strictInstrumental: false, scenePriority: false, transcribe: false, outputVideo: false, fadeIn: 0, fadeOut: 0 };
+  const logger = { log() {}, error() {} };
+  const initial = await runBatch(options, logger);
+  assert.equal(initial.completed, 1);
+  const result = initial.results[0];
+  await makeSilentWav(result.outputPath, result.duration);
+  const beforeAudio = await fs.readFile(result.outputPath);
+  const beforeTimeline = await fs.readFile(result.timelinePath);
+  const stateFile = path.join(options.output, '.mvp-state.json');
+  const saved = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  Object.assign(saved.episodes[videos], { analysisVersion: 'scene-required-with-mood-v4',
+    mood: '中性留白', moods: ['中性留白'], track: null, tracks: [null] });
+  saved.episodes[videos].analysis.segments = [{ start: 0, end: result.duration, mood: '中性留白', track: null }];
+  await fs.writeFile(stateFile, JSON.stringify(saved));
+  const manual = path.join(options.output, 'manual-notes.txt');
+  await fs.writeFile(manual, 'manual notes');
+  const resumed = await runBatch(options, logger);
+  assert.equal(resumed.skipped, 1);
+  assert.equal(resumed.results[0].needsRegeneration, true);
+  assert.deepEqual(await fs.readFile(result.outputPath), beforeAudio);
+  assert.deepEqual(await fs.readFile(result.timelinePath), beforeTimeline);
+  assert.equal(await fs.readFile(manual, 'utf8'), 'manual notes');
+  assert.match(await fs.readFile(path.join(options.output, 'run-report.md'), 'utf8'), /旧策略产物.*需要重新生成/);
+  const regenerated = await runBatch({ ...options, skipCompleted: false }, logger);
+  assert.equal(regenerated.completed, 1);
+  assert.equal(regenerated.results[0].analysis.segments[0].selectedMood, '温情');
+  assert.ok(await wavRms(result.outputPath, 0.2, 0.6) > 0.001);
+  assert.equal(await fs.readFile(manual, 'utf8'), 'manual notes');
 });
 
 test('library health exposes silent, broken, short, duplicate and empty mood entries', async (t) => {
@@ -431,7 +472,9 @@ test('uses only persistent script mood turns and never fills the segment limit b
     options: { maxTracksPerEpisode: 3 },
     trackUses: new Map(),
   });
-  assert.equal(oneMood.segments.length, 1);
+  assert.deepEqual(oneMood.segments.map(({ requestedMood }) => requestedMood), ['浪漫', '温情']);
+  assert.equal(new Set(oneMood.segments.map(({ track }) => track)).size, 1);
+  assert.equal(oneMood.segments[1].matchType, 'similar');
 });
 
 test('ignores a brief isolated emotion mention between longer story sections', () => {
@@ -759,7 +802,7 @@ test('batch MVP renders Chinese paths, ducking, validation, and resume', async (
   assert.equal(changedTranscript.completed, 2);
   assert.equal(changedTranscript.skipped, 0);
   assert.equal(changedTranscript.results.find((item) => item.episode === '第2集').mood, '默认');
-  assert.match(await fs.readFile(csv, 'utf8'), /,0,\[\],0:00,0,scene-required-with-mood-v4,/);
+  assert.match(await fs.readFile(csv, 'utf8'), /,0,\[\],0:00,0,similar-music-fallback-v5,/);
   await fs.writeFile(finalVideo, 'broken final output', 'utf8');
   const recoveredFinal = await runBatch({ strictInstrumental: false, ...options }, { log() {}, error() {} });
   assert.equal(recoveredFinal.completed, 1);
@@ -1051,6 +1094,59 @@ test('splits a long episode at a transcript mood turn and renders two BGM segmen
   const audio = media.streams.find((stream) => stream.codec_name === 'pcm_s16le');
   assert.ok(audio);
   assert.ok(Math.abs(Number(media.format.duration) - 50) <= 0.05);
+});
+
+test('similar-style intent changes continue a nonstationary track instead of replaying its opening', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-continuous-intent-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const track = path.join(root, 'changing-tone.wav');
+  await execFileAsync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=16',
+    '-f', 'lavfi', '-i', 'sine=frequency=880:duration=24',
+    '-filter_complex', '[0:a][1:a]concat=n=2:v=0:a=1[a]',
+    '-map', '[a]', '-ar', '48000', '-ac', '2', track,
+  ], { windowsHide: true });
+  const nextTrack = path.join(root, 'romance.wav');
+  await makeAudio(nextTrack, 1320);
+  const plan = buildMusicPlan({
+    duration: 60,
+    groups: new Map([['悬疑', [track]], ['浪漫', [nextTrack]]]),
+    transcript: { segments: [
+      { start: 1, end: 12, text: "We're trapped. Help me!" },
+      { start: 25, end: 36, text: 'A secret clue. We need to find out.' },
+      { start: 45, end: 56, text: 'I love you. You mean everything to me.' },
+    ] },
+    options: { scenePriority: true },
+    trackUses: new Map(),
+  });
+  assert.deepEqual(plan.segments.map(({ requestedMood }) => requestedMood), ['紧张', '悬疑', '浪漫']);
+  for (const transitionFadeEnabled of [false, true]) {
+    const output = path.join(root, `${transitionFadeEnabled}.wav`);
+    const args = ['-hide_banner', '-loglevel', 'error', '-y'];
+    for (const segment of plan.segments) args.push('-stream_loop', '-1', '-i', segment.track);
+    args.push('-filter_complex', buildMultiTrackFilter(plan.segments, 60,
+      { fadeIn: 0, fadeOut: 0, transitionFadeEnabled }, [], false),
+    '-map', '[aout]', '-t', '60', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output);
+    await execFileAsync(ffmpeg, args, { windowsHide: true });
+    const wav = await fs.readFile(output);
+    const sampleRate = wav.readUInt32LE(24);
+    const channels = wav.readUInt16LE(22);
+    const dataOffset = wav.indexOf('data', 12) + 8;
+    for (const [time, frequency] of [[26, 880], [50, 1320]]) {
+      const start = dataOffset + time * sampleRate * channels * 2;
+      const end = start + sampleRate * 0.25 * channels * 2;
+      let crossings = 0;
+      let previous = 0;
+      for (let offset = start; offset < end; offset += channels * 2) {
+        const sample = wav.readInt16LE(offset);
+        if (previous <= 0 && sample > 0) crossings += 1;
+        previous = sample;
+      }
+      assert.ok(Math.abs(crossings / 0.25 - frequency) <= 8,
+        `expected ${frequency} Hz music at ${time}s, got ${crossings / 0.25} Hz with fades=${transitionFadeEnabled}`);
+    }
+  }
 });
 
 test('required scene renders a short switch despite the cap while the disabled mode keeps one track', async (t) => {

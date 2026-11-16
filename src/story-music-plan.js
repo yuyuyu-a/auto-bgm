@@ -1,5 +1,7 @@
 'use strict';
 
+const { describeTrackSelection, selectionReason } = require('./music-selection');
+
 function publicStoryProfile(profile = {}) {
   let baseUrl = '';
   try {
@@ -71,15 +73,16 @@ function buildStoryMusicPlan(context, chooseTrack) {
     const track = cue.mood === null ? null : chooseTrack(groups, cue.mood, trackUses, episodeTracks,
       options.trackMetadata, index > 0, transition.required ? previousTrack : null, cue.intensity);
     if (cue.mood !== null && transition.required && (!track || track === previousTrack)) {
-      throw new Error(`${start} 秒处必须换曲，但没有另一首匹配情绪或兼容中性的合格曲目；请补充或确认曲目后重试。`);
+      throw new Error(`${start} 秒处必须换曲，但没有另一首匹配情绪、相近风格或兼容中性的合格曲目；请补充或确认曲目后重试。`);
     }
-    if (cue.mood !== null && !track) throw new Error(`${start} 秒处剧情类别“${cue.mood}”没有合格曲目；请补充或确认该类别或兼容中性曲目后重试。`);
+    if (cue.mood !== null && !track) throw new Error(`${start} 秒处剧情类别“${cue.mood}”没有合格曲目；请补充或确认该类别、相近风格或兼容中性曲目后重试。`);
     if (track && !screened.has(track)) throw new Error('剧情配乐只能使用已筛选的本地曲库文件');
     const metadata = options.trackMetadata?.get(track);
-    const fallback = Boolean(track && !groups.get(cue.mood)?.includes(track));
+    const selection = describeTrackSelection(groups, cue.mood, track);
+    const fallback = Boolean(track && selection.matchType !== 'exact');
     const segment = {
-      start, end, startSegment: cue.startSegment, mood: cue.mood ?? '剧情留白', track,
-      reason: [cue.reason, transition.required ? transition.reason : '', fallback ? '目标情绪曲目不足，使用兼容中性曲目' : ''].filter(Boolean).join('；'),
+      start, end, startSegment: cue.startSegment, mood: cue.mood ?? '剧情留白', track, ...selection,
+      reason: [cue.reason, transition.required ? transition.reason : '', selectionReason(selection)].filter(Boolean).join('；'),
       confidence: cue.confidence, review: cue.review || fallback || Boolean(transition.required),
       explicitSilence: cue.mood === null, cueIn: metadata?.cueIn || 0, intensity: cue.intensity,
       instrumentalStatus: metadata?.status || (track ? 'unknown' : 'silence'),

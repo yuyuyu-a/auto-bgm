@@ -44,14 +44,16 @@ test('scene candidates deduplicate shots and preserve the emotion-first behavior
   assert.ok(plan.sceneCandidates.every((cut) => !cut.used));
 });
 
-test('intensity precedes reuse count; missing target music falls back only to neutral or silence', () => {
+test('intensity precedes reuse count and uncertain emotion without neutral uses restrained library music', () => {
   const choices = new Map([['紧张', ['quiet.wav', 'strong.wav']]]);
   const metadata = new Map([['quiet.wav', { intensity: 1 }], ['strong.wav', { intensity: 3, cueIn: 12, status: 'confirmed' }]]);
   const result = buildMusicPlan({ duration: 50, groups: choices, transcript: null, options: { mood: '紧张', trackMetadata: metadata }, trackUses: new Map([['strong.wav', 100]]) });
   assert.equal(result.segments[0].track, 'strong.wav');
   assert.equal(result.segments[0].cueIn, 12);
-  const noEvidence = buildMusicPlan({ duration: 50, groups: choices, transcript: null, options: {}, trackUses: new Map() });
-  assert.equal(noEvidence.segments[0].track, null);
+  const noEvidence = buildMusicPlan({ duration: 50, groups: choices, transcript: null, options: { trackMetadata: metadata }, trackUses: new Map() });
+  assert.equal(noEvidence.segments[0].track, 'quiet.wav');
+  assert.equal(noEvidence.segments[0].review, true);
+  assert.equal(noEvidence.segments[0].matchType, 'library');
 });
 
 test('sustained conflict ends at a shot with a long pause; cuts alone keep the same music', () => {
@@ -108,6 +110,28 @@ test('manual review persists without changing music, invalidates confirmation wh
   await assert.rejects(reviewTrack(root, tracks, { file, action: 'metadata', cueIn: -1, intensity: 3 }, options), /入点/);
   await fs.writeFile(cachePath(root, options), 'broken cache');
   await assert.rejects(readLibrary(root, options), /缓存损坏/);
+});
+
+test('similar fallback never bypasses strict screening or a disabled library entry', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-similar-screening-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const warm = path.join(root, 'warm.wav');
+  const disabled = path.join(root, 'disabled.wav');
+  const unverified = path.join(root, 'unverified.wav');
+  await Promise.all([warm, disabled, unverified].map((file) => fs.writeFile(file, 'unchanged music')));
+  const tracks = new Map([['温情', [warm, disabled]], ['浪漫', [unverified]]]);
+  const options = { music: root, libraryCacheDir: path.join(root, 'cache'), strictInstrumental: true };
+  await reviewTrack(root, tracks, { file: warm, action: 'confirm' }, options);
+  await reviewTrack(root, tracks, { file: disabled, action: 'disable' }, options);
+  const screened = await filterLibrary(tracks, options);
+  const result = buildMusicPlan({ duration: 30, groups: screened.groups, options: { mood: '浪漫' }, trackUses: new Map() });
+  assert.equal(result.segments[0].track, warm);
+  assert.equal(result.segments[0].matchType, 'similar');
+  await reviewTrack(root, tracks, { file: warm, action: 'disable' }, options);
+  const empty = await filterLibrary(tracks, options);
+  assert.throws(() => buildMusicPlan({ duration: 30, groups: empty.groups,
+    options: { mood: '浪漫' }, trackUses: new Map() }), /合格曲目/);
+  assert.equal(await fs.readFile(warm, 'utf8'), 'unchanged music');
 });
 
 test('missing model leaves unknown music excluded and unchanged cache is reused', async (t) => {

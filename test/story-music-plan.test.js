@@ -103,6 +103,34 @@ test('missing story music or required alternatives fail actionably instead of fa
   assert.match(neutral.segments[0].reason, /兼容中性/);
 });
 
+test('an unavailable valid story category uses similar music with accurate provenance and keeps deliberate silence', () => {
+  const result = plan([cue(0, '浪漫'), cue(2, null)], {
+    groups: new Map([['浪漫', []], ['温情', ['warm.wav']], ['默认', ['neutral.wav']]]),
+  });
+  assert.deepEqual(result.segments.map(({ track }) => track), ['warm.wav', null]);
+  assert.equal(result.segments[0].requestedMood, '浪漫');
+  assert.equal(result.segments[0].selectedMood, '温情');
+  assert.equal(result.segments[0].matchType, 'similar');
+  assert.equal(result.segments[0].review, true);
+  assert.match(result.segments[0].reason, /浪漫.*相近.*温情/);
+  assert.doesNotMatch(result.segments[0].reason, /兼容中性/);
+  assert.equal(result.segments[1].explicitSilence, true);
+  assert.equal(result.segments[1].matchType, 'silence');
+});
+
+test('story switching can substitute suspense for a second tension track without moving the scene', () => {
+  const result = plan([cue(0, '紧张', 3)], {
+    groups: new Map([['紧张', ['only.wav']], ['悬疑', ['mystery.wav']], ['默认', ['neutral.wav']]]),
+    options: { storyEnabled: true, scenePriority: true },
+    sceneCuts: [{ time: 8, score: 50 }],
+  });
+  assert.deepEqual(result.segments.map(({ track }) => track), ['only.wav', 'mystery.wav']);
+  assert.equal(result.segments[1].start, 8);
+  assert.equal(result.segments[1].selectedMood, '悬疑');
+  assert.equal(result.segments[1].matchType, 'similar');
+  assert.equal(result.sceneCandidates[0].used, true);
+});
+
 test('local story builder rejects malformed cues and low alignment defensively', () => {
   const invalid = [
     [], [cue(2, '紧张')], [cue(0, '紧张'), cue(0, '浪漫')],

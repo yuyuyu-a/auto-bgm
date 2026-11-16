@@ -8,12 +8,13 @@ const { cachePath, filterLibrary, readLibrary, writeLibrary, ANALYSIS_VERSION, A
 const { assertStoryTranscript, buildStoryMusicPlan, publicStoryProfile } = require('./story-music-plan');
 const { loadStoryDocument, STORY_EXTENSIONS } = require('./story-input');
 const { deduplicateMusic } = require('./music-dedup');
+const { canonicalMood, chooseTrack, describeTrackSelection, findCompatibleMoodFolder, findMoodFolder, selectionReason } = require('./music-selection');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
 const DEFAULT_MOOD = '默认';
 const STATE_VERSION = 14;
-const PLANNING_VERSION = 'scene-required-with-mood-v4';
+const PLANNING_VERSION = 'similar-music-fallback-v5';
 
 const MOOD_RULES = [
   { mood: '紧张', words: ['危险', '追杀', '逃跑', '快跑', '小心', '冲突', '打架', '绑架', '枪', '杀', '来不及', '怎么办', '救命', '别过来', 'danger', 'chase', 'run away', 'hurry', 'hurry up', 'careful', 'kidnap', 'kidnapped', 'gun', 'kill', 'killed', 'fight', 'fighting', "we're running out of time", 'what do we do', "don't come", "i'm scared", "i'm afraid", 'please help', 'help me', 'get out of here', 'we have to go', "they're coming", "we're trapped"] },
@@ -85,10 +86,6 @@ function parseArgs(argv) {
 
 function naturalCompare(a, b) {
   return new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' }).compare(a, b);
-}
-
-function normalizeMood(value) {
-  return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
 }
 
 function normalizePath(value) {
@@ -459,33 +456,6 @@ function mergeIntervals(segments, duration, padding = 0.12) {
   return merged;
 }
 
-function findMoodFolder(mood, groups) {
-  const wanted = normalizeMood(mood);
-  if (!wanted) return null;
-  const names = [...groups.keys()];
-  const exact = names.find((name) => normalizeMood(name) === wanted);
-  if (exact) return exact;
-
-  const aliases = {
-    紧张: ['紧张', '激烈', '冲突'],
-    愤怒: ['愤怒', '压迫', '反派'],
-    悬疑: ['悬疑', '忧郁', '阴暗', '神秘'],
-    爽感: ['爽感', '爽', '打脸', '酷感', '放克'],
-    欢快: ['欢快', '活泼', '轻松'],
-    浪漫: ['浪漫', '爱情', '温柔'],
-    励志: ['励志', '成长', '希望'],
-    伤感: ['伤感', '悲伤', '悲情', '失落', '离别'],
-    温情: ['温情', '治愈', '平静', '陪伴', '温柔'],
-    默认: ['默认', 'default', '平静', '治愈'],
-  };
-  const candidates = [mood, ...(aliases[mood] || [])].map(normalizeMood).filter(Boolean);
-  for (const candidate of candidates) {
-    const match = names.find((name) => normalizeMood(name).includes(candidate));
-    if (match) return match;
-  }
-  return null;
-}
-
 const NEGATION_PATTERN = /(?:(?:不|没|未|别|无|不是|从不|从没)(?:再|会|想|要|觉得|那么|很|真的|感到|是|有){0,3}|(?:\bnever|\bnot|\bno|n't)(?:\s+[a-z]+){0,3})\s*$/i;
 const WEAK_ENGLISH_CUES = new Set(['mom', 'mother', 'dad', 'father', 'family', 'wife', 'husband', 'love', 'loves', 'wedding', 'marry', 'married', 'happy', 'sad', 'sorry', 'thank', 'thanks', 'care', 'home', 'careful', 'danger', 'fight', 'fighting', 'monitor', 'follow', 'finally', 'hope', 'support', '爱', '喜欢', '婚礼', '妈妈', '爸爸', '家人', '小心']);
 MOOD_RULES.find((rule) => rule.mood === '浪漫').words.push('我爱你', '我们一直相爱', '我们结婚吧', 'i love my husband', 'i love my wife');
@@ -513,13 +483,13 @@ function moodCandidates(text, groups) {
     const hits = moodWordHits(text, rule);
     const usableHits = hits.filter((hit) => !WEAK_ENGLISH_CUES.has(hit));
     const phraseHits = usableHits.filter((hit) => hit.length >= 3 || hit.includes(' ')).length;
-    return { mood: findMoodFolder(rule.mood, groups), hits: usableHits, score: usableHits.length + phraseHits * 0.25 };
+    return { mood: findMoodFolder(rule.mood, groups) || rule.mood, hits: usableHits, score: usableHits.length + phraseHits * 0.25 };
   }).filter((result) => result.mood && result.score > 0).sort((a, b) => b.score - a.score || b.hits.length - a.hits.length);
 }
 
 function inferMood(transcript, groups, override) {
   if (override) {
-    const folder = findMoodFolder(override, groups);
+    const folder = findMoodFolder(override, groups) || canonicalMood(override);
     if (!folder) throw new Error(`找不到指定情绪目录“${override}”，已有目录: ${[...groups.keys()].join(', ')}`);
     return { mood: folder, reason: `人工覆盖: ${override}` };
   }
@@ -528,23 +498,7 @@ function inferMood(transcript, groups, override) {
   const hits = moodCandidates(text, groups);
   if (hits.length) return { mood: hits[0].mood, reason: `对白情绪线索: ${hits[0].hits.join('、')}` };
   const fallback = findMoodFolder(DEFAULT_MOOD, groups);
-  return { mood: fallback, review: true, reason: fallback ? '情绪证据不足，使用中性回退，待试听' : '情绪证据不足且无中性曲目，保留留白，待检查' };
-}
-
-function chooseTrack(groups, mood, trackUses, episodeTracks, metadata = new Map(), changeTrack = false, previousTrack = null, intensityOverride) {
-  const moodTracks = groups.get(mood);
-  const preferred = (moodTracks?.length ? moodTracks : groups.get(findMoodFolder(DEFAULT_MOOD, groups)) || []).filter((track) => track !== previousTrack);
-  const unused = preferred.filter((track) => !episodeTracks.has(track));
-  const neutral = changeTrack ? (groups.get(findMoodFolder(DEFAULT_MOOD, groups)) || []).filter((track) => track !== previousTrack) : [];
-  const unusedNeutral = neutral.filter((track) => !episodeTracks.has(track));
-  const candidates = unused.length ? unused : unusedNeutral.length ? unusedNeutral : preferred.length ? preferred : neutral;
-  if (!candidates.length) return null;
-  const intensity = intensityOverride ?? (/紧张|愤怒|冲突|爽感/.test(mood) ? 3 : /浪漫|欢快|励志/.test(mood) ? 2 : 1);
-  return [...candidates].sort((a, b) => {
-    const intensityDifference = Math.abs((metadata.get(a)?.intensity || 2) - intensity) - Math.abs((metadata.get(b)?.intensity || 2) - intensity);
-    const useDiff = (trackUses.get(a) || 0) - (trackUses.get(b) || 0);
-    return intensityDifference || useDiff || naturalCompare(path.basename(a), path.basename(b));
-  })[0];
+  return { mood: fallback, review: true, reason: fallback ? '情绪证据不足，使用中性回退，待试听' : '情绪证据不足且无中性曲目，使用曲库中较克制的候选，待试听' };
 }
 
 const DEFAULT_TRANSITION_FADE_SECONDS = 1;
@@ -645,6 +599,8 @@ function buildMusicPlan(context) {
     const previous = moodRuns[index - 1];
     const current = moodRuns[index];
     if (previous.mood === current.mood) continue;
+    const previousFolder = findCompatibleMoodFolder(previous.mood, groups);
+    const compatibleContinuation = Boolean(previousFolder && previousFolder === findCompatibleMoodFolder(current.mood, groups));
     const gapStart = Math.min(previous.end, current.start);
     const gapEnd = current.start;
     const scene = sceneCuts.filter((cut) => cut.time >= gapStart - 0.2 && cut.time <= gapEnd + 0.2 && (!scenePriority || Math.abs(cut.time - current.start) <= 1.5))
@@ -654,6 +610,7 @@ function buildMusicPlan(context) {
       boundary: clamp(scene?.time ?? (pause ? gapEnd - Math.min(0.2, (gapEnd - gapStart) / 2) : current.start), 0, duration),
       window: [gapStart, gapEnd], sceneTime: scene?.time,
       nextMood: current.mood,
+      compatibleContinuation,
       reason: scene ? '持续对白情绪转折与镜头候选重合' : pause ? '持续对白情绪转折，落在对白停顿' : '持续对白情绪转折，落在句段边界',
       score: previous.hitCount + current.hitCount + Math.min(current.end - current.start, 30) / 30,
     });
@@ -689,11 +646,11 @@ function buildMusicPlan(context) {
       if (candidate.boundary <= 0 || candidate.boundary >= duration) continue;
       const existing = boundaries.find((item) => Math.abs(item.boundary - candidate.boundary) < 0.25);
       if (existing) {
-        if (candidate.sceneChange) Object.assign(existing, { boundary: candidate.boundary, sceneTime: candidate.sceneTime, sceneChange: true });
+        if (candidate.sceneChange) Object.assign(existing, { boundary: candidate.boundary, sceneTime: candidate.sceneTime, sceneChange: true, required: true, changeTrack: true });
         existing.nextMood ||= candidate.nextMood;
         existing.neutralReset ||= candidate.neutralReset;
         existing.reason = [...new Set([existing.reason, candidate.reason])].join('；');
-      } else boundaries.push({ ...candidate, required: true, changeTrack: true });
+      } else boundaries.push({ ...candidate, required: !candidate.compatibleContinuation, changeTrack: !candidate.compatibleContinuation });
     }
   } else for (const candidate of candidates.sort((a, b) => b.score - a.score || a.boundary - b.boundary)) {
     if (boundaries.length >= maxSegments - 1) break;
@@ -739,20 +696,26 @@ function buildMusicPlan(context) {
   }
   const segments = [];
   for (const section of sections) {
-    const { start, end, mood, transition } = section;
+    const { start, end, transition } = section;
     const previous = segments.at(-1);
+    const reset = transition?.neutralReset || transition?.sceneChange;
+    const mood = section.mood || (!reset ? previous?.selectedMood : null) || null;
     const track = chooseTrack(groups, mood, trackUses, episodeTracks, options.trackMetadata, transition?.changeTrack || episodeTracks.size < requestedMinimum, transition?.required ? previous?.track : null);
-    if (transition?.required && (!track || track === previous?.track)) throw new Error(`${formatNumber(start)} 秒处必须换曲，但没有另一首匹配情绪或兼容中性的合格曲目；请补充或确认曲目后重试。`);
+    if (transition?.required && (!track || track === previous?.track)) throw new Error(`${formatNumber(start)} 秒处必须换曲，但没有另一首匹配情绪、相近风格或兼容中性的合格曲目；请补充或确认曲目后重试。`);
+    if (!track) throw new Error(`${formatNumber(start)} 秒处目标情绪“${mood || '未明确'}”没有匹配、相近风格或兼容中性的合格曲目；请补充或确认曲库后重试。`);
     const metadata = options.trackMetadata?.get(track);
-    const compatibleFallback = track && !(groups.get(mood) || []).includes(track);
+    const selection = describeTrackSelection(groups, mood, track);
+    if (!section.mood) Object.assign(selection, { requestedMood: null, matchType: 'library' });
+    const compatibleFallback = selection.matchType !== 'exact';
     const evidence = moodRuns.filter((run) => Math.min(run.end, end) > Math.max(run.start, start));
     const review = Boolean(transition?.changeTrack) || !evidence.length || end - Math.max(...evidence.map((run) => run.end)) > 12 || compatibleFallback || !track;
     const reason = [start > 0 ? boundaries.find((item) => Math.abs(item.boundary - start) < 0.001)?.reason : '',
-      sectionReason(classified, start, end, options), compatibleFallback ? '目标情绪曲目不足，使用兼容中性曲目' : '',
-      !track ? '无匹配的纯音乐，留白待检查' : review ? '规则证据不足，保守沿用或中性回退，待试听' : ''].filter(Boolean).join('；');
-    if (previous && previous.track === track) { previous.end = end; previous.reason += '；后续相近需求继续原曲'; previous.review ||= review; continue; }
+      sectionReason(classified, start, end, options), selectionReason(selection),
+      review ? '规则证据不足或使用替代曲目，待试听' : ''].filter(Boolean).join('；');
+    if (previous && previous.track === track && previous.requestedMood === selection.requestedMood) { previous.end = end; previous.reason += '；后续相近需求继续原曲'; previous.review ||= review; continue; }
     if (track) { episodeTracks.add(track); trackUses.set(track, (trackUses.get(track) || 0) + 1); }
-    segments.push({ start, end, mood: mood || '中性留白', track, reason, review,
+    segments.push({ start, end, mood: mood || selection.selectedMood, track, reason, review, ...selection,
+      continueTrack: Boolean(previous && previous.track === track),
       cueIn: metadata?.cueIn || 0, intensity: metadata?.intensity || null,
       instrumentalStatus: metadata?.status || (track ? 'unknown' : 'silence'),
       vocalEvidence: metadata?.analysis?.intervals || [],
@@ -767,7 +730,7 @@ function buildMusicPlan(context) {
   if (sceneCandidates.some((cut) => cut.required && !cut.used)) throw new Error('检测到转场却未能更换曲目，请检查转场计划后重试');
   const actualTracks = new Set(segments.map((segment) => segment.track).filter(Boolean)).size;
   const trackCount = { minimum: requestedMinimum, actual: actualTracks, segments: segments.length, met: actualTracks >= requestedMinimum };
-  trackCount.warning = trackCount.met ? '' : `未达到每集至少 ${requestedMinimum} 首：实际 ${actualTracks} 首；${minimumTarget < requestedMinimum ? '有效配乐时长不足或受必换点分段限制，补足片段至少保留 6 秒' : '当前情绪及兼容中性曲目不足，不使用不匹配或未通过筛选的曲目补数'}。`;
+  trackCount.warning = trackCount.met ? '' : `未达到每集至少 ${requestedMinimum} 首：实际 ${actualTracks} 首；${minimumTarget < requestedMinimum ? '有效配乐时长不足或受必换点分段限制，补足片段至少保留 6 秒' : '当前情绪、相近风格及兼容中性曲目不足，不使用不匹配或未通过筛选的曲目补数'}。`;
   return { baseMood, segments, sceneCandidates, trackCount, planningVersion: PLANNING_VERSION };
 }
 
@@ -817,7 +780,22 @@ function transitionFadeSeconds(options) {
   return Number.isFinite(requested) ? Math.max(0, requested) : DEFAULT_TRANSITION_FADE_SECONDS;
 }
 
+function playbackSpans(segments) {
+  const spans = [];
+  for (const [inputIndex, segment] of segments.entries()) {
+    const previous = spans.at(-1);
+    if (segment.continueTrack && previous?.track && previous.track === segment.track &&
+      !segment.explicitSilence && !previous.explicitSilence && !segment.transition?.required &&
+      previous.end === segment.start && (previous.cueIn || 0) === (segment.cueIn || 0)) {
+      previous.end = segment.end;
+    } else spans.push({ ...segment, inputIndex });
+  }
+  return spans;
+}
+
 function buildMultiTrackFilter(segments, duration, options, intervals, hasDialogue = true) {
+  // Keep intent segments in artifacts, but render an unchanged track continuously.
+  segments = playbackSpans(segments);
   const shortest = Math.min(...segments.map((segment) => segment.end - segment.start));
   const crossfade = segments.length > 1 && options.transitionFadeEnabled !== false
     ? Math.min(transitionFadeSeconds(options), shortest / 2)
@@ -850,7 +828,7 @@ function buildMultiTrackFilter(segments, duration, options, intervals, hasDialog
     if (fadeIn > 0) filters.push('afade=t=in:st=0:d=' + formatNumber(fadeIn));
     if (fadeOut > 0) filters.push('afade=t=out:st=' + formatNumber(Math.max(0, renderDuration - fadeOut)) + ':d=' + formatNumber(fadeOut));
     if (renderStart > 0) filters.push('adelay=' + Math.round(renderStart * 1000) + ':all=1');
-    graph.push('[' + index + ':a]' + filters.join(',') + '[seg' + index + ']');
+    graph.push('[' + segment.inputIndex + ':a]' + filters.join(',') + '[seg' + index + ']');
   });
   const silenceRanges = segments.filter((segment) => segment.explicitSilence);
   const silenceCondition = silenceRanges.map((segment) => `gte(t,${segment.start})*lt(t,${segment.end})`).join('+');
@@ -898,7 +876,8 @@ function csvEscape(value) {
 }
 
 function timelineCsv({ episode, segments, options, intervals, freezeTailSeconds, trackCount }) {
-  const crossfade = segments.length > 1 && options.transitionFadeEnabled !== false ? Math.min(transitionFadeSeconds(options), ...segments.map((segment) => (segment.end - segment.start) / 2)) : 0;
+  const spans = playbackSpans(segments);
+  const crossfade = spans.length > 1 && options.transitionFadeEnabled !== false ? Math.min(transitionFadeSeconds(options), ...spans.map((segment) => (segment.end - segment.start) / 2)) : 0;
   const headers = ['episode', 'segment', 'start_sec', 'end_sec', 'bgm_file', 'mood', 'selection_reason', 'fade_in_sec', 'fade_out_sec', 'duck_db', 'duck_segments', 'freeze_tail', 'freeze_tail_sec', 'analysis_version', 'instrumental_status', 'cue_in_sec', 'intensity', 'needs_review', 'timing_source', 'transition_evidence', 'duck_attack_sec', 'duck_release_sec', 'music_loudness_lufs', 'vocal_evidence', 'scene_priority', 'minimum_tracks', 'actual_tracks', 'minimum_met'];
   const rows = segments.map((segment, index) => [
     episode,
@@ -908,8 +887,8 @@ function timelineCsv({ episode, segments, options, intervals, freezeTailSeconds,
     segment.track ? path.relative(options.music, segment.track) : '',
     segment.mood,
     segment.reason,
-    formatNumber(index === 0 ? clamp(Number(options.fadeIn) || 0, 0, segment.end - segment.start) : crossfade),
-    formatNumber(index === segments.length - 1 ? clamp(Number(options.fadeOut) || 0, 0, segment.end - segment.start) : crossfade),
+    formatNumber(index === 0 ? clamp(Number(options.fadeIn) || 0, 0, spans[0].end - spans[0].start) : segment.continueTrack ? 0 : crossfade),
+    formatNumber(index === segments.length - 1 ? clamp(Number(options.fadeOut) || 0, 0, spans.at(-1).end - spans.at(-1).start) : segments[index + 1]?.continueTrack ? 0 : crossfade),
     formatNumber(options.autoDuck && segment.track && options.duckDb < 0 && clipIntervals(intervals, segment.start, segment.end).length ? options.duckDb : 0),
     JSON.stringify(options.autoDuck && segment.track && options.duckDb < 0 ? clipIntervals(intervals, segment.start, segment.end).map((interval) => ({
       start: Number(formatNumber(interval.start)),
