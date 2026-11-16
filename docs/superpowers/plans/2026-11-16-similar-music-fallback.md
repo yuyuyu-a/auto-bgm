@@ -106,3 +106,64 @@ assert.equal(result.segments[0].review, true);
   boundaries, CSV fades, and preservation of intent records.
 - Work retained on local branch `fix/similar-music-fallback`; no main-branch merge,
   remote push, release build, private-settings access, or installed-app changes.
+
+## Task 2: User-Requested Lyrical Substitute
+
+**Files:**
+- Modify: `src/music-selection.js`, `src/mvp.js`, `src/story-director.js`,
+  `README.md`.
+- Test: `test/music-selection.test.js`, `test/music-scan.test.js`,
+  `test/story-music-plan.test.js`, `test/story-director.test.js`,
+  `test/mvp.test.js`.
+
+**Interfaces:** Preserve all existing chooser and planner signatures. Add the
+distinct canonical category `抒情` to folder recognition, not dialogue keywords.
+Selection still exposes `requestedMood`, `selectedMood`, `matchType`, and `review`.
+
+- [x] Add real planner regressions for missing romance/warmth using lyrical
+  music before neutral/inspiration, preserving exact-style priority, numbered
+  folders, truthful provenance, and rejecting unrelated opposing styles.
+
+```js
+const result = plan([['抒情', ['lyrical.wav']], ['默认', ['neutral.wav']]],
+  'I love you. You mean everything to me.');
+assert.equal(result.segments[0].track, 'lyrical.wav');
+assert.equal(result.segments[0].requestedMood, '浪漫');
+assert.equal(result.segments[0].selectedMood, '抒情');
+assert.equal(result.segments[0].matchType, 'similar');
+assert.equal(result.segments[0].review, true);
+```
+
+- [x] Add a filesystem scan fixture `音乐合集/03_抒情/第二辑/theme.wav`
+  and assert it belongs to `03_抒情`, not `音乐合集`. Add story selection
+  coverage for valid empty categories and verify the outbound director request
+  includes lyrical substitution guidance without disclosing local media paths.
+- [x] Run `node --test test/music-selection.test.js test/music-scan.test.js
+  test/story-music-plan.test.js test/story-director.test.js` and observe the
+  new regressions fail for the missing lyrical behavior.
+- [x] Implement `抒情: ['抒情']` in category aliases, romance substitutes
+  `['温情', '抒情']`, and warmth substitutes `['浪漫', '抒情', '励志']`.
+  Include `抒情` in scan-recognized categories, update director guidance, and
+  advance the planning version from v5 to v6. Document the label-based behavior.
+- [x] Rerun focused tests, `npm.cmd test`, `npm.cmd run test:desktop-ui`, and
+  `git diff --check`; obtain independent scoped review and commit locally.
+
+### Refinement Verification Progress
+
+- Before implementation, the focused run had 55 passes and 5 expected failures:
+  romance/warmth ignored lyrical tracks, nested scan grouped lyrical music
+  under its collection, story fallback chose neutral, and the director request
+  lacked lyrical substitution guidance.
+- After implementation, all 71 selection, scan, story, and strict-screening
+  focused tests passed. Desktop UI smoke passed; `desk.png` was inspected.
+- The first full run had 204 passes and 1 failure: a CSV integration assertion
+  hardcoded planning v5. It now verifies exported artifact metadata against
+  `PLANNING_VERSION`, preserving its no-duck and freeze-tail checks across
+  intentional planning-version changes.
+- Fresh complete rerun: `npm.cmd test` passed all 205 tests, 0 failures,
+  0 skips, 68.2 seconds. `git diff --check` passed.
+- Independent scoped review found no issues in fallback priority, nested
+  numbered scanning, provenance, required alternatives, or strict screening;
+  the reviewer independently passed 62 focused tests and in-memory probes.
+- Retain this refinement as a local feature-branch commit only. No remote
+  push, release, installed-app replacement, or private-settings access.

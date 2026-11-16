@@ -131,6 +131,21 @@ test('story switching can substitute suspense for a second tension track without
   assert.equal(result.sceneCandidates[0].used, true);
 });
 
+test('empty romance and warmth story categories substitute lyrical music before neutral', () => {
+  for (const mood of ['浪漫', '温情']) {
+    const result = plan([cue(0, mood), cue(2, null)], {
+      groups: new Map([[mood, []], ['抒情', ['lyrical.wav']], ['默认', ['neutral.wav']]]),
+    });
+    assert.deepEqual(result.segments.map(({ track }) => track), ['lyrical.wav', null]);
+    assert.equal(result.segments[0].requestedMood, mood);
+    assert.equal(result.segments[0].selectedMood, '抒情');
+    assert.equal(result.segments[0].matchType, 'similar');
+    assert.equal(result.segments[0].review, true);
+    assert.match(result.segments[0].reason, /相近.*抒情/);
+    assert.equal(result.segments[1].explicitSilence, true);
+  }
+});
+
 test('local story builder rejects malformed cues and low alignment defensively', () => {
   const invalid = [
     [], [cue(2, '紧张')], [cue(0, '紧张'), cue(0, '浪漫')],

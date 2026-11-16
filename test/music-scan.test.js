@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { inferMood, scanMusic } = require('../src/mvp');
+const { buildMusicPlan, inferMood, scanMusic } = require('../src/mvp');
 
 async function libraryFixture(t, names) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-music-scan-'));
@@ -75,6 +75,18 @@ test('recursive music scan retains custom first-level labels and same-name files
   ];
   assert.deepEqual((await scanMusic(root)).get('史诗氛围'), expected);
   assert.deepEqual((await scanMusic(root)).get('史诗氛围'), expected);
+});
+
+test('nested numbered lyrical categories remain selectable beneath collection wrappers', async (t) => {
+  const root = await libraryFixture(t, ['音乐合集/03_抒情/第二辑/theme.wav']);
+  const groups = await scanMusic(root);
+  assert.deepEqual([...groups], [['03_抒情', [path.join(root, '音乐合集/03_抒情/第二辑/theme.wav')]]]);
+  const result = buildMusicPlan({
+    duration: 40, groups, options: { mood: '温情', scenePriority: false }, trackUses: new Map(),
+  });
+  assert.equal(result.segments[0].track, path.join(root, '音乐合集/03_抒情/第二辑/theme.wav'));
+  assert.equal(result.segments[0].selectedMood, '03_抒情');
+  assert.equal(result.segments[0].matchType, 'similar');
 });
 
 test('recursive music scan ignores directory links and cycles instead of leaving the library', async (t) => {

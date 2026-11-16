@@ -138,6 +138,7 @@ test('story request sends grounded dialogue and category counts, not local media
   assert.match(prompt, /suppressed|script|剧本/i);
   assert.match(prompt, /I'm fine/);
   assert.match(prompt, /startSegment/);
+  assert.match(payload.messages[0].content, /romance.*warmth.*抒情/i);
   assert.equal(prompt.includes('private/sad.wav'), false);
   assert.equal(prompt.includes(settings.apiKey), false);
   const input = JSON.parse(payload.messages.at(-1).content);

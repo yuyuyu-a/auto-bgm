@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
-const { DEFAULT_TRANSITION_FADE_SECONDS, buildAudioFilter, buildMusicPlan, buildMultiTrackFilter, freezeTailDuration, inferMood, mergeIntervals, runBatch, scanMusic } = require('../src/mvp');
+const { DEFAULT_TRANSITION_FADE_SECONDS, PLANNING_VERSION, buildAudioFilter, buildMusicPlan, buildMultiTrackFilter, freezeTailDuration, inferMood, mergeIntervals, runBatch, scanMusic } = require('../src/mvp');
 
 const execFileAsync = promisify(execFile);
 const ffmpeg = process.env.FFMPEG || 'ffmpeg';
@@ -802,7 +802,7 @@ test('batch MVP renders Chinese paths, ducking, validation, and resume', async (
   assert.equal(changedTranscript.completed, 2);
   assert.equal(changedTranscript.skipped, 0);
   assert.equal(changedTranscript.results.find((item) => item.episode === '第2集').mood, '默认');
-  assert.match(await fs.readFile(csv, 'utf8'), /,0,\[\],0:00,0,similar-music-fallback-v5,/);
+  assert.ok((await fs.readFile(csv, 'utf8')).includes(`,0,[],0:00,0,${PLANNING_VERSION},`));
   await fs.writeFile(finalVideo, 'broken final output', 'utf8');
   const recoveredFinal = await runBatch({ strictInstrumental: false, ...options }, { log() {}, error() {} });
   assert.equal(recoveredFinal.completed, 1);

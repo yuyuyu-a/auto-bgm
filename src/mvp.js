@@ -14,7 +14,7 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
 const DEFAULT_MOOD = '默认';
 const STATE_VERSION = 14;
-const PLANNING_VERSION = 'similar-music-fallback-v5';
+const PLANNING_VERSION = 'similar-music-fallback-v6';
 
 const MOOD_RULES = [
   { mood: '紧张', words: ['危险', '追杀', '逃跑', '快跑', '小心', '冲突', '打架', '绑架', '枪', '杀', '来不及', '怎么办', '救命', '别过来', 'danger', 'chase', 'run away', 'hurry', 'hurry up', 'careful', 'kidnap', 'kidnapped', 'gun', 'kill', 'killed', 'fight', 'fighting', "we're running out of time", 'what do we do', "don't come", "i'm scared", "i'm afraid", 'please help', 'help me', 'get out of here', 'we have to go', "they're coming", "we're trapped"] },
@@ -240,7 +240,7 @@ async function scanMusic(musicDir) {
   if (!stat.isDirectory()) throw new Error('BGM 参数必须是目录: ' + musicDir);
 
   const groups = new Map();
-  const knownMoods = [DEFAULT_MOOD, ...MOOD_RULES.map((rule) => rule.mood)];
+  const knownMoods = [DEFAULT_MOOD, '抒情', ...MOOD_RULES.map((rule) => rule.mood)];
   async function visit(directory, mood) {
     const entries = await fs.readdir(directory, { withFileTypes: true });
     const tracks = entries

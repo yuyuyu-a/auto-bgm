@@ -27,6 +27,49 @@ test('missing romance retains its intended emotion and substitutes warmth instea
   assert.match(segment.reason, /浪漫.*相近.*温情/);
 });
 
+test('missing romance uses lyrical music before neutral and retains its requested emotion', () => {
+  const result = plan([['抒情', ['lyrical.wav']], ['默认', ['neutral.wav']]],
+    'I love you. You mean everything to me.');
+  const segment = result.segments[0];
+  assert.equal(segment.track, 'lyrical.wav');
+  assert.equal(segment.requestedMood, '浪漫');
+  assert.equal(segment.selectedMood, '抒情');
+  assert.equal(segment.matchType, 'similar');
+  assert.equal(segment.review, true);
+  assert.match(segment.reason, /浪漫.*相近.*抒情/);
+});
+
+test('missing warmth uses numbered lyrical folders before inspiration and neutral', () => {
+  const result = plan([
+    ['03_抒情', ['lyrical.wav']], ['励志', ['inspiring.wav']], ['默认', ['neutral.wav']],
+  ], "We're family. I'm here for you. You're not alone.");
+  const segment = result.segments[0];
+  assert.equal(segment.track, 'lyrical.wav');
+  assert.equal(segment.requestedMood, '温情');
+  assert.equal(segment.selectedMood, '03_抒情');
+  assert.equal(segment.matchType, 'similar');
+  assert.equal(segment.review, true);
+});
+
+test('exact romance and warmth retain priority over unused lyrical substitutes', () => {
+  for (const mood of ['浪漫', '温情']) {
+    const result = plan([[mood, ['exact.wav']], ['抒情', ['lyrical.wav']]], null, {
+      options: { mood, scenePriority: false },
+      trackUses: new Map([['exact.wav', 100]]),
+    });
+    assert.equal(result.segments[0].track, 'exact.wav');
+    assert.equal(result.segments[0].matchType, 'exact');
+  }
+});
+
+test('lyrical music is not a universal fallback for tension or a generic piano folder', () => {
+  assert.throws(() => plan([['抒情', ['lyrical.wav']]], "We're trapped. Help me!"),
+    /紧张.*合格曲目|合格曲目.*紧张/);
+  assert.throws(() => plan([['钢琴', ['piano.wav']]], null, {
+    options: { mood: '浪漫', scenePriority: false },
+  }), /浪漫.*合格曲目|合格曲目.*浪漫/);
+});
+
 test('missing tension prefers suspense over neutral and recognizes numbered category aliases', () => {
   const result = plan([
     ['默认', ['neutral.wav']],

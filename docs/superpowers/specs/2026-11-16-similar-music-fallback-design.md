@@ -15,8 +15,8 @@ discussed no-accidental-silence behavior.
   an opposing emotion merely to satisfy a track-count target.
 - Compatibility is directional and ordered: tension -> suspense, anger, gloom;
   anger -> tension, suspense, gloom; suspense -> gloom, tension;
-  gloom -> sadness, suspense; sadness -> gloom; romance -> warmth;
-  warmth -> romance, inspiration; cheerful -> triumphant, inspiration;
+  gloom -> sadness, suspense; sadness -> gloom; romance -> warmth, lyrical;
+  warmth -> romance, lyrical, inspiration; cheerful -> triumphant, inspiration;
   inspiration -> triumphant, warmth, cheerful;
   triumphant -> inspiration, cheerful.
 - Category similarity uses folder labels, not acoustic emotion classification.
@@ -62,3 +62,16 @@ with large libraries, intensity/reuse order, mandatory alternatives, strict
 screening, deliberate story silence, and old-output resume. Run the complete
 Node suite and desktop UI smoke test. No new dependencies, credentials,
 paid requests, release uploads, or installer replacement are part of this change.
+
+## Approved Refinement: Lyrical Substitutes
+
+The user explicitly requests using "抒情" when their library lacks romance and
+warmth categories. Keep exact-category priority and the existing romance/warmth
+cross-substitution; use lyrical music before neutral or inspirational fallback.
+Recognize "抒情" as a distinct category, including numbered names and nested
+categories beneath collection folders. Do not classify every piano track as
+lyrical, conflate English "lyrics" with instrumental music, or add acoustic
+emotion recognition. Rule and story selection share the same compatibility
+table; the story-director prompt must explain this available-category substitute.
+Record the actual selected folder and mark substitutions for review. Advance
+the planning version without overwriting existing outputs.
