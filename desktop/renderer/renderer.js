@@ -121,13 +121,17 @@ function renderLibraryHealth() {
   }).join('')}</div></details><p class="config-note">机器筛选可能漏检或误剔除。人工确认与禁用按文件指纹保存；文件变动后重新分析。没有人工入点时从 0 秒播放。检查不会删除曲目。</p></div>`;
 }
 
+function queueDisplayStatus(row) {
+  return row.needsRegeneration && ['completed', 'skipped'].includes(row.status) ? 'pending' : row.status;
+}
+
 function renderMetrics() {
   const rows = state.data.rows || [];
-  const counts = state.run?.counts;
-  const completed = counts?.completed ?? rows.filter((row) => row.status === 'completed').length;
-  const skipped = counts?.skipped ?? rows.filter((row) => row.status === 'skipped').length;
+  const counts = state.running ? state.run?.counts : undefined;
+  const completed = counts?.completed ?? rows.filter((row) => queueDisplayStatus(row) === 'completed').length;
+  const skipped = counts?.skipped ?? rows.filter((row) => queueDisplayStatus(row) === 'skipped').length;
   const failed = counts ? counts.failed + counts.interrupted : rows.filter((row) => ['failed', 'interrupted'].includes(row.status)).length;
-  const total = state.run?.total || rows.length;
+  const total = (state.running && state.run?.total) || rows.length;
   const pending = Math.max(0, total - completed - skipped - failed - (state.running && state.run?.currentEpisode && !state.run.currentSettled ? 1 : 0));
   return `<div class="metric accent"><b>${completed}</b><span>已完成</span></div><div class="metric"><b>${skipped}</b><span>已跳过</span></div><div class="metric good"><b>${state.running ? '运行中' : '空闲'}</b><span>批次状态</span></div><div class="metric"><b>${failed}</b><span>失败 / 中断</span></div><div class="metric"><b>${pending}</b><span>待处理 / 共 ${total} 集</span></div>`;
 }
@@ -143,7 +147,8 @@ function renderProgress() {
 
 function renderQueueRow(row) {
   const count = row.analysis?.trackCount || row.trackCount;
-  return `<td><span class="episode-name">${escapeHtml(row.episode)}</span><span class="episode-sub">${escapeHtml(row.error || count?.warning || shortPath(row.videoPath, 48))}</span></td><td><span class="status-chip ${statusClass(row.status)}">${statusLabel(row.status)}</span></td><td>${formatSeconds(row.duration)}</td><td>${count ? `${count.actual} 首 · ${count.segments} 段<br>` : ''}${escapeHtml(row.mood || '未判定')}<span class="episode-sub">${escapeHtml((row.tracks || []).map((track) => String(track).split(/[\\/]/).pop()).join(' · ') || '—')}</span></td><td><span class="episode-sub">${escapeHtml(artifactSummary(row))}</span></td><td><button class="button compact ghost" data-action="open-detail" data-episode="${escapeHtml(row.episode)}">查看</button></td>`;
+  const stale = queueDisplayStatus(row) !== row.status;
+  return `<td><span class="episode-name">${escapeHtml(row.episode)}</span><span class="episode-sub">${escapeHtml(row.error || row.regenerationReason || count?.warning || shortPath(row.videoPath, 48))}</span></td><td><span class="status-chip ${statusClass(stale ? 'pending' : row.status)}">${stale ? '待重新生成' : statusLabel(row.status)}</span></td><td>${formatSeconds(row.duration)}</td><td>${count ? `${count.actual} 首 · ${count.segments} 段<br>` : ''}${escapeHtml(row.mood || '未判定')}<span class="episode-sub">${escapeHtml((row.tracks || []).map((track) => String(track).split(/[\\/]/).pop()).join(' · ') || '—')}</span></td><td><span class="episode-sub">${escapeHtml(artifactSummary(row))}</span></td><td><button class="button compact ghost" data-action="open-detail" data-episode="${escapeHtml(row.episode)}">查看</button></td>`;
 }
 
 function patchQueue() {
@@ -163,7 +168,7 @@ function patchQueue() {
     const html = renderQueueRow(row);
     if (node._content !== html) { node.innerHTML = html; node._content = html; }
     node.classList.toggle('selected', row.episode === state.selectedEpisode);
-    node.hidden = !row.episode.toLocaleLowerCase().includes(state.queueQuery.toLocaleLowerCase()) || (state.queueFilter !== 'all' && row.status !== state.queueFilter);
+    node.hidden = !row.episode.toLocaleLowerCase().includes(state.queueQuery.toLocaleLowerCase()) || (state.queueFilter !== 'all' && queueDisplayStatus(row) !== state.queueFilter);
     if (!node.hidden) visible += 1;
     existing.delete(row.episode);
   }
@@ -218,7 +223,13 @@ function scheduleLiveUpdate() {
 function renderSelectedEpisode() {
   const row = selectedRow();
   if (!row) return '<div class="panel-head"><strong>当前选集</strong></div><div class="empty-state">选择一集查看产物与错误详情。</div>';
-  return `<div class="panel-head"><strong>当前选集</strong><small>${escapeHtml(row.episode)}</small></div><div class="panel-body inspector"><div class="inspector-row"><span>状态</span><b>${statusLabel(row.status)}</b></div><div class="inspector-row"><span>情绪</span><b>${escapeHtml(row.mood || '—')}</b></div><div class="inspector-row"><span>时长</span><b>${formatSeconds(row.duration)}</b></div><button class="button" data-action="open-timeline" data-episode="${escapeHtml(row.episode)}">打开时间轴</button><button class="button ghost" data-action="open-transcript" data-episode="${escapeHtml(row.episode)}">打开对白审阅</button><button class="button ghost" data-action="regenerate" ${state.running || state.starting ? 'disabled' : ''}>重新生成当前集</button>${row.error ? `<div class="notice error-text">${escapeHtml(row.error)}<br>原始素材未修改。请检查文件权限、媒体组件和同名产物，再重试失败项。</div>` : ''}</div>`;
+  return `<div class="panel-head"><strong>当前选集</strong><small>${escapeHtml(row.episode)}</small></div><div class="panel-body inspector"><div class="inspector-row"><span>状态</span><b>${queueDisplayStatus(row) !== row.status ? '待重新生成' : statusLabel(row.status)}</b></div><div class="inspector-row"><span>情绪</span><b>${escapeHtml(row.mood || '—')}</b></div><div class="inspector-row"><span>时长</span><b>${formatSeconds(row.duration)}</b></div>${renderRegenerationWarning(row)}<button class="button" data-action="open-timeline" data-episode="${escapeHtml(row.episode)}">打开时间轴</button><button class="button ghost" data-action="open-transcript" data-episode="${escapeHtml(row.episode)}">打开对白审阅</button><button class="button ghost" data-action="regenerate" ${state.running || state.starting ? 'disabled' : ''}>重新生成当前集</button>${row.error ? `<div class="notice error-text">${escapeHtml(row.error)}<br>原始素材未修改。请检查文件权限、媒体组件和同名产物，再重试失败项。</div>` : ''}</div>`;
+}
+
+function renderRegenerationWarning(item) {
+  return item.needsRegeneration
+    ? `<div class="notice" role="status"><b>待重新生成</b><br>${escapeHtml(item.regenerationReason || '旧策略产物已保留，需要重新生成。')}</div>`
+    : '';
 }
 
 function escapeHtml(value) {
@@ -1169,7 +1180,9 @@ api.onBatchEvent((event) => {
   } else if (event.type === 'finished') {
     state.running = false;
     state.logs.push({ level: 'success', message: `批次结束 · 完成 ${event.summary?.completed || 0} · 跳过 ${event.summary?.skipped || 0} · 失败 ${event.summary?.failed || 0}` });
-    showToast('批次已结束，正在刷新产物');
+    const staleCount = (event.summary?.results || []).filter((item) => item.needsRegeneration).length;
+    if (staleCount) state.logs.push({ level: 'error', message: `仍有 ${staleCount} 集含旧策略产物，需要重新生成。` });
+    showToast(staleCount ? `批次结束，仍有 ${staleCount} 集需要重新生成` : '批次已结束，正在刷新产物');
     refresh(true, true);
   } else if (event.type === 'stopped') {
     state.running = false;

@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
+const Module = require('node:module');
 const { promisify } = require('node:util');
 const execute = promisify(require('node:child_process').execFile);
 const temporary = require('node:fs').mkdtempSync(path.join(os.tmpdir(), 'auto-bgm-release-'));
@@ -94,6 +95,42 @@ app.whenReady().then(async () => {
     assert.equal(result.segments[0].matchType, 'similar');
     assert.equal(result.segments[0].review, true);
   }
+  const legacyFilename = path.join(source, 'src/legacy-release-fixture.js');
+  const legacy = new Module(legacyFilename, module);
+  legacy.filename = legacyFilename;
+  legacy.paths = Module._nodeModulePaths(path.dirname(legacyFilename));
+  legacy._compile((await execute('git', ['show', 'v1.0.4:src/mvp.js'],
+    { cwd: repository, windowsHide: true })).stdout, legacyFilename);
+  const repairOptions = {
+    videos: video, music: lyricalMusic, output: path.join(fixture, 'legacy-output'),
+    libraryCacheDir: path.join(temporary, 'legacy-library-cache'),
+    ffmpeg, ffprobe, strictInstrumental: false, scenePriority: false,
+    transcribe: false, outputVideo: false, fadeIn: 0, fadeOut: 0,
+  };
+  const quietLogger = { log() {}, error() {} };
+  const oldSummary = await legacy.exports.runBatch(repairOptions, quietLogger);
+  assert.equal(oldSummary.completed, 1, JSON.stringify(oldSummary.results));
+  const oldResult = oldSummary.results[0];
+  assert.ok(oldResult.analysis.segments.every(({ track, mood }) => !track && mood === '中性留白'));
+  const samples = async () => (await execute(ffmpeg, ['-v', 'error', '-ss', '0.2',
+    '-i', oldResult.outputPath, '-t', '0.3', '-f', 's16le', '-ac', '1', '-'],
+  { windowsHide: true, encoding: 'buffer' })).stdout;
+  const oldSamples = await samples();
+  assert.ok(oldSamples.length > 0 && oldSamples.every((byte) => byte === 0));
+  assert.equal((await inspectBatch(repairOptions)).rows[0].needsRegeneration, true);
+  const sourceBefore = await fs.readFile(video);
+  const manual = path.join(repairOptions.output, 'manual-notes.txt');
+  await fs.writeFile(manual, 'manual fixture notes');
+  const repaired = await runBatch(repairOptions, quietLogger);
+  assert.equal(repaired.completed, 1, JSON.stringify(repaired.results));
+  assert.equal(repaired.skipped, 0);
+  assert.equal(repaired.results[0].needsRegeneration, false);
+  assert.ok(repaired.results[0].tracks.includes(lyricalTrack));
+  assert.ok((await samples()).some((byte) => byte !== 0));
+  assert.deepEqual(await fs.readFile(video), sourceBefore);
+  assert.equal(await fs.readFile(manual, 'utf8'), 'manual fixture notes');
+  assert.equal((await inspectBatch(repairOptions)).rows[0].needsRegeneration, false);
+  assert.equal((await runBatch(repairOptions, quietLogger)).skipped, 1);
   let requests = 0;
   let providerError;
   const server = http.createServer(async (request, response) => {
@@ -206,7 +243,7 @@ app.whenReady().then(async () => {
     product: '自动配乐', version: packaged.version, ownUpdateFeed: true,
     realTranscription: true, localRequests: requests, silenceSamplesZero: true,
     isolatedEncryptedSettings: true, sameNameDedupBeforeDecode: true,
-    nestedLyricalSubstitution: true, screenshots: fixture,
+    nestedLyricalSubstitution: true, realLegacySilenceRepair: true, screenshots: fixture,
   }));
   app.quit();
 }).catch((error) => {

@@ -13,6 +13,25 @@ const execFileAsync = promisify(execFile);
 const ffmpeg = process.env.FFMPEG || 'ffmpeg';
 const ffprobe = process.env.FFPROBE || 'ffprobe';
 
+test('legacy silence repair distinguishes mixed accidental gaps from explicit story silence', () => {
+  const { episodePlanningStatus } = require('../src/mvp');
+  const legacy = {
+    analysisVersion: 'scene-required-with-mood-v4', outputPath: 'episode_bgm.wav',
+    finalVideoPath: 'episode_final.mp4', timelinePath: 'episode_timeline.csv',
+    analysis: { segments: [
+      { track: 'music.wav', mood: '紧张' }, { track: null, mood: '中性留白' },
+    ] },
+  };
+  assert.deepEqual(episodePlanningStatus(legacy).repairArtifacts,
+    ['outputPath', 'finalVideoPath', 'timelinePath']);
+  assert.deepEqual(episodePlanningStatus({ ...legacy, storyEnabled: true }).repairArtifacts, []);
+  assert.deepEqual(episodePlanningStatus({ ...legacy,
+    analysis: { ...legacy.analysis, story: { source: 'episode.md' } } }).repairArtifacts, []);
+  assert.deepEqual(episodePlanningStatus({ ...legacy,
+    analysis: { segments: [{ track: null, mood: '中性留白', explicitSilence: true }] } }).repairArtifacts, []);
+  assert.deepEqual(episodePlanningStatus({ ...legacy, analysisVersion: PLANNING_VERSION }).repairArtifacts, []);
+});
+
 test('restrained fallback renders music and legacy completion can resume with an empty strict pool', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-silence-legacy-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -44,7 +63,7 @@ test('restrained fallback renders music and legacy completion can resume with an
   assert.match(rejected.results[0].error, /纯音乐筛选条件/);
 });
 
-test('old accidental silence is flagged for regeneration without rewriting owned or manual outputs', async (t) => {
+test('old accidental silence regenerates on default resume without rewriting source or manual files', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-old-silent-plan-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const music = path.join(root, 'music');
@@ -59,6 +78,8 @@ test('old accidental silence is flagged for regeneration without rewriting owned
   assert.equal(initial.completed, 1);
   const result = initial.results[0];
   await makeSilentWav(result.outputPath, result.duration);
+  await fs.writeFile(result.timelinePath,
+    `episode,segment,start_sec,end_sec,bgm_file,mood\nepisode,1,0,${result.duration},,中性留白\n`);
   const beforeAudio = await fs.readFile(result.outputPath);
   const beforeTimeline = await fs.readFile(result.timelinePath);
   const stateFile = path.join(options.output, '.mvp-state.json');
@@ -69,18 +90,108 @@ test('old accidental silence is flagged for regeneration without rewriting owned
   await fs.writeFile(stateFile, JSON.stringify(saved));
   const manual = path.join(options.output, 'manual-notes.txt');
   await fs.writeFile(manual, 'manual notes');
+  const sourceBefore = await fs.readFile(videos);
+  const { inspectBatch } = require('../desktop/backend/batch-service');
+  const staleRow = (await inspectBatch(options)).rows[0];
+  assert.equal(staleRow.needsRegeneration, true);
+  assert.match(staleRow.regenerationReason, /留白/);
   const resumed = await runBatch(options, logger);
-  assert.equal(resumed.skipped, 1);
-  assert.equal(resumed.results[0].needsRegeneration, true);
-  assert.deepEqual(await fs.readFile(result.outputPath), beforeAudio);
-  assert.deepEqual(await fs.readFile(result.timelinePath), beforeTimeline);
-  assert.equal(await fs.readFile(manual, 'utf8'), 'manual notes');
-  assert.match(await fs.readFile(path.join(options.output, 'run-report.md'), 'utf8'), /旧策略产物.*需要重新生成/);
-  const regenerated = await runBatch({ ...options, skipCompleted: false }, logger);
-  assert.equal(regenerated.completed, 1);
-  assert.equal(regenerated.results[0].analysis.segments[0].selectedMood, '温情');
+  assert.equal(resumed.completed, 1, JSON.stringify(resumed.results));
+  assert.equal(resumed.skipped, 0);
+  assert.equal(resumed.results[0].analysis.segments[0].selectedMood, '温情');
   assert.ok(await wavRms(result.outputPath, 0.2, 0.6) > 0.001);
+  assert.notDeepEqual(await fs.readFile(result.outputPath), beforeAudio);
+  assert.notDeepEqual(await fs.readFile(result.timelinePath), beforeTimeline);
+  assert.deepEqual(await fs.readFile(videos), sourceBefore);
   assert.equal(await fs.readFile(manual, 'utf8'), 'manual notes');
+  assert.equal((await inspectBatch(options)).rows[0].needsRegeneration, false);
+  assert.equal((await runBatch(options, logger)).skipped, 1);
+});
+
+test('partial silent legacy repair cannot certify deselected audio or final video', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-partial-silence-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const music = path.join(root, 'music');
+  await fs.mkdir(path.join(music, '抒情'), { recursive: true });
+  const track = path.join(music, '抒情', 'lyrical.wav');
+  const videos = path.join(root, 'episode.mp4');
+  await makeAudio(track, 440);
+  await makeVideo(videos);
+  const options = { music, videos, output: path.join(root, 'output'), ffmpeg, ffprobe,
+    libraryCacheDir: path.join(root, 'cache'), strictInstrumental: false,
+    scenePriority: false, transcribe: false, fadeIn: 0, fadeOut: 0 };
+  const logger = { log() {}, error() {} };
+  const initial = await runBatch(options, logger);
+  assert.equal(initial.completed, 1);
+  const result = initial.results[0];
+  await makeSilentWav(result.outputPath, result.duration);
+  await fs.writeFile(result.timelinePath,
+    `episode,segment,start_sec,end_sec,bgm_file,mood\nepisode,1,0,${result.duration},,中性留白\n`);
+  const beforeAudio = await fs.readFile(result.outputPath);
+  const beforeVideo = await fs.readFile(result.finalVideoPath);
+  const stateFile = path.join(options.output, '.mvp-state.json');
+  const saved = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  Object.assign(saved.episodes[videos], { analysisVersion: 'scene-required-with-mood-v4',
+    mood: '中性留白', tracks: [null], track: null });
+  saved.episodes[videos].analysis.segments = [{ start: 0, end: result.duration, mood: '中性留白', track: null }];
+  await fs.writeFile(stateFile, JSON.stringify(saved));
+  const controller = new AbortController();
+  const interrupted = await runBatch({ ...options, signal: controller.signal }, {
+    ...logger,
+    progress(event) { if (event.stage === 'rendering-audio') controller.abort(); },
+  });
+  assert.equal(interrupted.interrupted, 1);
+  const interruptedState = JSON.parse(await fs.readFile(stateFile, 'utf8')).episodes[videos];
+  assert.equal(interruptedState.status, 'interrupted');
+  assert.deepEqual(interruptedState.pendingSilenceRepairs, ['outputPath', 'finalVideoPath', 'timelinePath']);
+  assert.deepEqual(await fs.readFile(result.outputPath), beforeAudio);
+  assert.deepEqual(await fs.readFile(result.finalVideoPath), beforeVideo);
+  const timelineOnly = await runBatch({ ...options, outputAudio: false, outputVideo: false }, logger);
+  assert.equal(timelineOnly.completed, 1);
+  assert.deepEqual(await fs.readFile(result.outputPath), beforeAudio);
+  assert.deepEqual(await fs.readFile(result.finalVideoPath), beforeVideo);
+  const { inspectBatch } = require('../desktop/backend/batch-service');
+  assert.equal((await inspectBatch(options)).rows[0].needsRegeneration, true);
+  assert.equal((await runBatch({ ...options, outputAudio: false, outputVideo: false }, logger)).skipped, 1);
+  const audioOnly = await runBatch({ ...options, outputVideo: false }, logger);
+  assert.equal(audioOnly.completed, 1);
+  assert.ok(await wavRms(result.outputPath, 0.2, 0.6) > 0.001);
+  assert.deepEqual(await fs.readFile(result.finalVideoPath), beforeVideo);
+  assert.equal((await inspectBatch(options)).rows[0].needsRegeneration, true);
+  const final = await runBatch(options, logger);
+  assert.equal(final.completed, 1);
+  assert.equal((await inspectBatch(options)).rows[0].needsRegeneration, false);
+  assert.equal((await runBatch(options, logger)).skipped, 1);
+});
+
+test('legacy accidental silence with no screened music fails and preserves existing media', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-silent-empty-pool-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const music = path.join(root, 'music');
+  await fs.mkdir(music);
+  await makeAudio(path.join(music, 'tone.wav'), 440);
+  const videos = path.join(root, 'episode.mp4');
+  await makeVideo(videos);
+  const options = { music, videos, output: path.join(root, 'output'), ffmpeg, ffprobe,
+    libraryCacheDir: path.join(root, 'cache'), strictInstrumental: false,
+    scenePriority: false, transcribe: false, outputVideo: false, fadeIn: 0, fadeOut: 0 };
+  const logger = { log() {}, error() {} };
+  const initial = await runBatch(options, logger);
+  const result = initial.results[0];
+  await makeSilentWav(result.outputPath, result.duration);
+  const beforeAudio = await fs.readFile(result.outputPath);
+  const stateFile = path.join(options.output, '.mvp-state.json');
+  const saved = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  Object.assign(saved.episodes[videos], { analysisVersion: 'scene-required-with-mood-v4',
+    mood: '中性留白', tracks: [null], track: null });
+  saved.episodes[videos].analysis.segments = [{ start: 0, end: result.duration, mood: '中性留白', track: null }];
+  await fs.writeFile(stateFile, JSON.stringify(saved));
+  const failed = await runBatch({ ...options, strictInstrumental: true,
+    vocalModelPath: path.join(root, 'missing.tflite') }, logger);
+  assert.equal(failed.failed, 1);
+  assert.equal(failed.skipped, 0);
+  assert.match(failed.results[0].error, /纯音乐筛选条件/);
+  assert.deepEqual(await fs.readFile(result.outputPath), beforeAudio);
 });
 
 test('library health exposes silent, broken, short, duplicate and empty mood entries', async (t) => {
@@ -1400,8 +1511,16 @@ test('explicit all-silence story renders zero samples even when screened music i
   assert.deepEqual(silent.results[0].tracks, [null]);
   assert.equal(silent.results[0].analysis.ducking.enabled, false);
   assert.equal(await wavRms(silent.results[0].outputPath, 0.1, 3.4), 0);
+  const stateFile = path.join(options.output, '.mvp-state.json');
+  const saved = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+  saved.episodes[video].analysisVersion = 'scene-required-with-mood-v4';
+  await fs.writeFile(stateFile, JSON.stringify(saved));
+  const beforeAudio = await fs.readFile(silent.results[0].outputPath);
+  const beforeTimeline = await fs.readFile(silent.results[0].timelinePath);
   const resumed = await runBatch({ ...options, createStoryPlan() { throw new Error('unchanged story should skip'); } }, { log() {}, error() {} });
   assert.equal(resumed.skipped, 1);
+  assert.deepEqual(await fs.readFile(silent.results[0].outputPath), beforeAudio);
+  assert.deepEqual(await fs.readFile(silent.results[0].timelinePath), beforeTimeline);
   assert.equal(JSON.parse(await fs.readFile(path.join(options.output, '.mvp-state.json'), 'utf8')).episodes[video].status, 'completed');
 });
 

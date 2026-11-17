@@ -201,6 +201,25 @@ function staleStoryArtifacts(entry) {
   return Object.fromEntries(ARTIFACT_KEYS.map((key) => [key, Boolean(entry?.[key] && fingerprints[key] !== current)]));
 }
 
+function episodePlanningStatus(entry) {
+  const musicKeys = ['outputPath', 'finalVideoPath', 'timelinePath'];
+  const outdated = Boolean(entry && (entry.analysisVersion || entry.analysis?.segments?.length) &&
+    entry.analysisVersion !== PLANNING_VERSION);
+  const accidental = outdated && !entry.storyEnabled && !entry.analysis?.story &&
+    entry.analysis?.segments?.some((segment) =>
+      !segment.track && !segment.explicitSilence && segment.mood === '中性留白');
+  const pending = Array.isArray(entry?.pendingSilenceRepairs) ? entry.pendingSilenceRepairs : [];
+  const repairArtifacts = musicKeys.filter((key) => entry?.[key] && (accidental || pending.includes(key)));
+  const needsRegeneration = outdated || repairArtifacts.length > 0;
+  return {
+    needsRegeneration,
+    repairArtifacts,
+    regenerationReason: repairArtifacts.length
+      ? '旧版留白产物：已选择的产物将在运行时重新生成；未选择的产物仍需更新。'
+      : outdated ? '旧策略产物已保留；重新生成后应用新版选曲。' : '',
+  };
+}
+
 async function pathExists(filePath) {
   try {
     await fs.access(filePath);
@@ -999,7 +1018,7 @@ async function removeIfExists(filePath) {
   }
 }
 
-async function renderEpisode({ videoPath, outputDir, groups, state, options, catalogSignature, libraryUnavailableReason, storyInput, onProcessing, onStage }) {
+async function renderEpisode({ videoPath, outputDir, groups, state, options, catalogSignature, libraryUnavailableReason, storyInput, onProcessing, onStage, onRepair }) {
   const episode = path.parse(videoPath).name;
   const {
     outputPath, timelinePath, finalVideoPath, asrTranscriptPath,
@@ -1015,6 +1034,13 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     outputTimeline: options.outputTimeline !== false,
     outputTranscript: options.outputTranscript !== false,
   };
+  const selectedArtifacts = {
+    outputPath: selectedOutputs.outputAudio,
+    finalVideoPath: selectedOutputs.outputVideo,
+    timelinePath: selectedOutputs.outputTimeline,
+  };
+  const planningStatus = episodePlanningStatus(existing);
+  const repairsSelectedOutput = planningStatus.repairArtifacts.some((key) => selectedArtifacts[key]);
   const needsAudio = selectedOutputs.outputAudio || selectedOutputs.outputVideo;
   const timings = {};
   let activeStage;
@@ -1050,7 +1076,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
 
     const transcriptOutputValid = !selectedOutputs.outputTranscript || !transcriptRequired ||
       (ownsAsrTranscript && existingFingerprints.transcriptPath === storyFingerprint && await pathExists(asrTranscriptPath));
-    if (options.skipCompleted !== false && existing?.status === 'completed' && sameStory &&
+    if (!repairsSelectedOutput && options.skipCompleted !== false && existing?.status === 'completed' && sameStory &&
       (!selectedOutputs.outputAudio || (existingFingerprints.outputPath === storyFingerprint && existing.outputPath === outputPath && await outputIsValid(outputPath, musicDuration, options.ffprobe, options.ffmpeg, options.signal, Boolean(existing.analysis?.segments?.length && existing.analysis.segments.every((segment) => !segment.track))))) &&
       (!selectedOutputs.outputVideo || (existingFingerprints.finalVideoPath === storyFingerprint && existing.finalVideoPath === finalVideoPath && await finalVideoIsValid(finalVideoPath, probe.duration, options.ffprobe, options.ffmpeg, options.signal))) &&
       (!selectedOutputs.outputTimeline || (existingFingerprints.timelinePath === storyFingerprint && existing.timelinePath === timelinePath && await pathExists(timelinePath))) && transcriptOutputValid) {
@@ -1067,7 +1093,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       return {
         status: 'skipped', episode,
         analysisVersion: existing.analysisVersion || 'legacy',
-        needsRegeneration: existing.analysisVersion !== PLANNING_VERSION,
+        ...planningStatus,
         outputPath: selectedOutputs.outputAudio ? outputPath : '',
         finalVideoPath: selectedOutputs.outputVideo ? finalVideoPath : '',
         timelinePath: selectedOutputs.outputTimeline ? timelinePath : '',
@@ -1076,6 +1102,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       };
     }
 
+    if (repairsSelectedOutput) onRepair?.();
     if (!groups.size && !options.storyEnabled) throw new Error(libraryUnavailableReason);
     const ownsOutput = existing?.outputPath === outputPath;
     const ownsTimeline = existing?.timelinePath === timelinePath;
@@ -1123,6 +1150,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
 
     state.episodes[stateKey] = {
       ...existing, episode, status: 'processing', error: '', signature, storyFingerprint, storyEnabled: Boolean(options.storyEnabled),
+      pendingSilenceRepairs: planningStatus.repairArtifacts,
       artifactStoryFingerprints: existingFingerprints,
       sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs,
       videoPath, ...selectedOutputs,
@@ -1240,6 +1268,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     if (saveTranscript) fingerprints.transcriptPath = storyFingerprint;
     state.episodes[stateKey] = {
       ...state.episodes[stateKey], status: 'completed', signature, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs,
+      pendingSilenceRepairs: planningStatus.repairArtifacts.filter((key) => !selectedArtifacts[key]),
       artifactStoryFingerprints: fingerprints,
       episode, videoPath, ...selectedOutputs,
       outputPath: selectedOutputs.outputAudio ? outputPath : existing?.outputPath || '',
@@ -1260,6 +1289,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       transcriptPath: saveTranscript ? asrTranscriptPath : undefined,
       ...selectedOutputs, duration: probe.duration, mood: moods.join(' → '), moods, tracks,
       analysisVersion: PLANNING_VERSION, analysis,
+      ...episodePlanningStatus(state.episodes[stateKey]),
     };
 
   } catch (error) {
@@ -1389,6 +1419,7 @@ async function runBatch(options, logger = console) {
       const result = await renderEpisode({
         videoPath, outputDir: outputPath, groups, state, options, catalogSignature, libraryUnavailableReason, storyInput: storyInputs.get(videoPath),
         onStage(stage) { logger.progress?.({ ...progress, stage }); },
+        onRepair() { logger.log('检测到旧版中性留白：本次重新生成已选择的产物，不再跳过；原始素材保持不变。'); },
         onProcessing() {
           if (!checkingCompleted) return;
           logger.progress?.({ ...progress, status: 'processing' });
@@ -1398,6 +1429,7 @@ async function runBatch(options, logger = console) {
       results.push(result);
       logger.progress?.({ ...progress, ...result });
       logger.log('  ' + result.status + ': ' + result.outputPath);
+      if (result.needsRegeneration) logger.log('  待重新生成: ' + result.regenerationReason);
       if (result.analysis?.trackCount?.warning) logger.log('  待检查: ' + result.analysis.trackCount.warning);
     } catch (error) {
       const interrupted = options.signal?.aborted || error.name === 'AbortError' || error.code === 'ABORT_ERR';
@@ -1438,7 +1470,7 @@ async function writeBatchReport(output, summary, videos, state) {
     const status = result?.status || 'pending';
     const candidates = ['outputPath', 'finalVideoPath', 'timelinePath', 'transcriptPath'].filter((key) => ({ outputPath: saved.outputAudio, finalVideoPath: saved.outputVideo, timelinePath: saved.outputTimeline, transcriptPath: saved.outputTranscript })[key] !== false).map((key) => saved[key]).filter(Boolean);
     const artifacts = (await Promise.all(candidates.map(async (file) => await pathExists(file) ? file : ''))).filter(Boolean);
-    return `| ${cell(episode)} | ${labels[status]} | ${cell((saved.tracks || []).filter(Boolean).map((track) => path.basename(track)).join(' / ') || '留白')} | ${cell(saved.mood)} | ${cell(result?.error || (result?.needsRegeneration ? '旧策略产物：已保留，需要重新生成以应用新策略' : saved.analysis?.trackCount?.warning || ''))} | ${cell(artifacts.join(' / '))} |`;
+    return `| ${cell(episode)} | ${labels[status]} | ${cell((saved.tracks || []).filter(Boolean).map((track) => path.basename(track)).join(' / ') || '留白')} | ${cell(saved.mood)} | ${cell(result?.error || result?.regenerationReason || saved.analysis?.trackCount?.warning || '')} | ${cell(artifacts.join(' / '))} |`;
   }));
   const errors = summary.results.filter((item) => ['failed', 'interrupted'].includes(item.status));
   const report = [`# 批次报告`, '', `生成时间：${summary.generatedAt}`, '', `共 ${summary.videos} 集；完成 ${summary.completed}，跳过 ${summary.skipped}，失败 ${summary.failed}，中断 ${summary.interrupted}，未处理 ${summary.pending}。`, '', `分析版本：${summary.analysisVersion}；曲库筛选：${JSON.stringify(summary.library)}。疑似人声数量不是人工确认的人声曲目数。`, '', '| 集数 | 状态 | 使用音乐 | 情绪变化 | 失败原因 / 待检查 | 输出文件 |', '| --- | --- | --- | --- | --- | --- |', ...rows, '', '失败后可使用“仅重试失败项”或“继续未完成”。原始视频和音乐未修改；交付前请试听对白、切点和压低效果。原片音轨被保留，其中是否已有音乐尚未全段听辨，可能与新 BGM 叠加。词级时间和镜头候选不代表剧情语义或逐帧精度。', ''].join('\n');
@@ -1466,6 +1498,7 @@ module.exports = {
   scanMusic,
   scanVideos,
   staleStoryArtifacts,
+  episodePlanningStatus,
   usage,
   writeBatchReport,
 };

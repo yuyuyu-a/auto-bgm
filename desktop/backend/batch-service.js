@@ -8,7 +8,7 @@ const { promisify } = require('node:util');
 const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
-const { AUDIO_EXTENSIONS, DEFAULT_TRANSITION_FADE_SECONDS, VIDEO_EXTENSIONS, assertStorySourcesSafe, inspectMusicCatalog, runBatch, scanMusic, scanVideos, staleStoryArtifacts } = require('../../src/mvp');
+const { AUDIO_EXTENSIONS, DEFAULT_TRANSITION_FADE_SECONDS, VIDEO_EXTENSIONS, assertStorySourcesSafe, episodePlanningStatus, inspectMusicCatalog, runBatch, scanMusic, scanVideos, staleStoryArtifacts } = require('../../src/mvp');
 const { cachePath, filterLibrary, readLibrary, writeLibrary, reviewTrack } = require('../../src/music-library');
 const { publicStoryProfile } = require('../../src/story-music-plan');
 const { STORY_EXTENSIONS } = require('../../src/story-input');
@@ -206,7 +206,7 @@ async function inspectBatch(input = {}) {
     }
     const sourceVideoPath = videoPath || key || '';
     const extension = path.extname(sourceVideoPath) || '.mp4';
-    return { episode, videoPath: sourceVideoPath, status: item.status || 'pending', staleArtifacts: staleStoryArtifacts(item), duration: Number.isFinite(Number(item.duration)) ? Number(item.duration) : null, mood: item.mood || '', moods: item.moods || [], trackCount: item.analysis?.trackCount, tracks: item.tracks || (item.track ? [item.track] : []), outputAudio: item.outputAudio !== false, outputVideo: item.outputVideo !== false, outputTimeline: item.outputTimeline !== false, outputTranscript: item.outputTranscript !== false, transcribe: item.transcribe === undefined ? Boolean(config.transcribe) : Boolean(item.transcribe), outputPath: item.outputAudio === false ? '' : item.outputPath || (output ? path.join(output, `${episode}_bgm.wav`) : ''), finalVideoPath: item.outputVideo === false ? '' : item.finalVideoPath || (output ? path.join(output, `${episode}_final${extension.toLowerCase()}`) : ''), timelinePath: item.outputTimeline === false ? '' : item.timelinePath || (output ? path.join(output, `${episode}_timeline.csv`) : ''), transcriptPath: item.outputTranscript === false ? '' : typeof item.transcriptPath === 'string' ? item.transcriptPath : output ? path.join(output, `${episode}_transcript.json`) : '', error: item.error || '', updatedAt: item.updatedAt || '' };
+    return { episode, videoPath: sourceVideoPath, status: item.status || 'pending', ...episodePlanningStatus(item), staleArtifacts: staleStoryArtifacts(item), duration: Number.isFinite(Number(item.duration)) ? Number(item.duration) : null, mood: item.mood || '', moods: item.moods || [], trackCount: item.analysis?.trackCount, tracks: item.tracks || (item.track ? [item.track] : []), outputAudio: item.outputAudio !== false, outputVideo: item.outputVideo !== false, outputTimeline: item.outputTimeline !== false, outputTranscript: item.outputTranscript !== false, transcribe: item.transcribe === undefined ? Boolean(config.transcribe) : Boolean(item.transcribe), outputPath: item.outputAudio === false ? '' : item.outputPath || (output ? path.join(output, `${episode}_bgm.wav`) : ''), finalVideoPath: item.outputVideo === false ? '' : item.finalVideoPath || (output ? path.join(output, `${episode}_final${extension.toLowerCase()}`) : ''), timelinePath: item.outputTimeline === false ? '' : item.timelinePath || (output ? path.join(output, `${episode}_timeline.csv`) : ''), transcriptPath: item.outputTranscript === false ? '' : typeof item.transcriptPath === 'string' ? item.transcriptPath : output ? path.join(output, `${episode}_transcript.json`) : '', error: item.error || '', updatedAt: item.updatedAt || '' };
   });
   let musicGroups = [];
   let musicCount = 0;
@@ -374,6 +374,7 @@ async function episodeDetail(input = {}) {
   return {
     episode,
     status: stateEntry.status || 'pending',
+    ...episodePlanningStatus(stateEntry),
     staleArtifacts: staleStoryArtifacts(stateEntry),
     duration: Number(stateEntry.duration) || (timeline.length ? Number(timeline[timeline.length - 1].end_sec) + (Number(timeline[0].freeze_tail_sec) || 0) : 0),
     freezeTail: timeline[0]?.freeze_tail || '0:00',

@@ -172,6 +172,22 @@ app.whenReady().then(async () => {
     assert.equal(await js('workbenchTest.calls().some(call=>call.action === "library-stop")'), true);
     await js('state.config.minTracksPerEpisode=3; updateLive()');
     assert.equal(await js('preflightChecks().find(check=>check.name === "BGM").ok'), true);
+    await js('state.selectedEpisode="第1集"; state.data.rows[0].needsRegeneration=true; state.data.rows[0].regenerationReason="旧版留白产物，已选择的产物将在运行时重新生成"; render()');
+    await js('document.getElementById("queue-filter").value="pending"; document.getElementById("queue-filter").dispatchEvent(new Event("change",{bubbles:true}))');
+    assert.equal(await js('document.querySelector("#queue-body tr[data-episode=第1集]").hidden'), false,
+      'Legacy repair candidates must remain visible in the pending filter');
+    assert.equal(await js('state.data.rows[0].status'), 'completed',
+      'Display status must not rewrite persisted completion state');
+    assert.equal(await js('Number(document.querySelector("#metrics .metric.accent b").textContent)'),
+      await js('state.data.rows.filter(row => row.status === "completed" && !row.needsRegeneration).length'));
+    await js('document.getElementById("queue-filter").value="all"; document.getElementById("queue-filter").dispatchEvent(new Event("change",{bubbles:true}))');
+    assert.match(await js('document.getElementById("selected-episode-panel").textContent'), /旧版留白/);
+    assert.match(await js('document.getElementById("queue-body").textContent'), /待重新生成/);
+    await capture('legacy-silence-warning.png');
+    window.setContentSize(760, 520);
+    await waitFor('document.getElementById("screen").scrollWidth <= document.getElementById("screen").clientWidth');
+    await js('document.getElementById("selected-episode-panel").scrollIntoView({block:"start"})');
+    await capture('legacy-silence-warning-minimum.png');
     await js('window.confirm=()=>false; document.querySelector("[data-action=new-batch]").click()');
     assert.equal(await js('document.getElementById("config-videos").value.length > 0'), true);
     await js('window.confirm=()=>true; document.querySelector("[data-action=new-batch]").click()');
