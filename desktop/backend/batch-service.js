@@ -29,6 +29,7 @@ const DEFAULTS = {
   strictInstrumental: true,
   autoDuck: true,
   maxTracksPerEpisode: 3,
+  maxTrackDuration: 40,
   outputAudio: true,
   outputVideo: true,
   outputTimeline: true,
@@ -92,6 +93,12 @@ async function readJson(filePath, fallback = null) {
 
 function cleanPath(value) { return String(value || '').trim(); }
 function asNumber(value, fallback) { const number = Number(value); return Number.isFinite(number) ? number : fallback; }
+function trackDurationSeconds(value) {
+  if (value === undefined) return DEFAULTS.maxTrackDuration;
+  if (typeof value !== 'number' && !(typeof value === 'string' && value.trim() !== '')) return NaN;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : NaN;
+}
 
 async function assertRunConfig(input, runtime = {}) {
   const minTracksInput = input?.minTracksPerEpisode;
@@ -115,6 +122,7 @@ async function assertRunConfig(input, runtime = {}) {
     skipCompleted: input?.skipCompleted === undefined ? DEFAULTS.skipCompleted : input.skipCompleted,
     minTracksPerEpisode: minTracksInput === undefined ? DEFAULTS.minTracksPerEpisode : String(minTracksInput).trim() ? Number(minTracksInput) : NaN,
     maxTracksPerEpisode: maxTracksInput === undefined ? DEFAULTS.maxTracksPerEpisode : String(maxTracksInput).trim() ? Number(maxTracksInput) : NaN,
+    maxTrackDuration: trackDurationSeconds(input?.maxTrackDuration),
     outputAudio: input?.outputAudio !== false, outputVideo: input?.outputVideo !== false,
     outputTimeline: input?.outputTimeline !== false, outputTranscript: input?.outputTranscript !== false,
     overwrite: Boolean(input?.overwrite), ffmpeg: cleanPath(runtime.ffmpeg) || cleanPath(input?.ffmpeg) || DEFAULTS.ffmpeg, ffprobe: cleanPath(runtime.ffprobe) || cleanPath(input?.ffprobe) || DEFAULTS.ffprobe,
@@ -136,6 +144,7 @@ async function assertRunConfig(input, runtime = {}) {
   if (!Number.isFinite(config.transitionFadeDuration) || config.transitionFadeDuration < 0) throw new Error('曲目衔接时长必须是非负数字');
   if (!Number.isSafeInteger(config.minTracksPerEpisode) || config.minTracksPerEpisode < 1) throw new Error('每集 BGM 下限必须是正整数');
   if (!Number.isSafeInteger(config.maxTracksPerEpisode) || config.maxTracksPerEpisode < 0) throw new Error('每集 BGM 上限必须是非负整数（0 表示不限制）');
+  if (!Number.isFinite(config.maxTrackDuration)) throw new Error('单曲连续播放时长必须是非负数字（0 表示不限制）');
   if (!config.scenePriority && config.maxTracksPerEpisode > 0 && config.minTracksPerEpisode > config.maxTracksPerEpisode) throw new Error('每集 BGM 下限不能高于上限');
   for (const key of ['outputAudio', 'outputVideo', 'outputTimeline', 'outputTranscript']) {
     if (input?.[key] !== undefined && typeof input[key] !== 'boolean') throw new Error('输出内容设置必须使用开关值');
@@ -170,7 +179,7 @@ function summaryByEpisode(summary) {
 function stateEpisodes(state) { return state?.episodes && typeof state.episodes === 'object' ? state.episodes : {}; }
 
 async function inspectBatch(input = {}) {
-  const config = { ...DEFAULTS, ...input };
+  const config = { ...DEFAULTS, ...input, maxTrackDuration: trackDurationSeconds(input.maxTrackDuration) };
   if (config.storyEnabled === true) config.transcribe = true;
   const output = cleanPath(config.output);
   const paths = {
@@ -333,6 +342,8 @@ async function diagnostics(input = {}, runtime = {}, versions = {}) {
   const [tools, model] = await Promise.all([inspectTools(config), modelInfo(cleanPath(config.modelPath) || DEFAULTS.modelPath)]);
   const settings = Object.fromEntries(['transcribe', 'autoDuck', 'scenePriority', 'overwrite', 'skipCompleted', 'outputAudio', 'outputVideo', 'outputTimeline', 'outputTranscript'].map((key) => [key, Boolean(config[key])]));
   for (const key of ['duckDb', 'fadeIn', 'fadeOut', 'transitionFadeDuration', 'minTracksPerEpisode', 'maxTracksPerEpisode']) settings[key] = Number.isFinite(Number(config[key])) ? Number(config[key]) : '未设置';
+  const maxTrackDuration = trackDurationSeconds(config.maxTrackDuration);
+  settings.maxTrackDuration = Number.isFinite(maxTrackDuration) ? maxTrackDuration : '未设置';
   settings.transitionFadeEnabled = config.transitionFadeEnabled !== false;
   settings.freezeTail = /^\d+:\d+$/.test(config.freezeTail) ? config.freezeTail : '无效或未设置';
   return JSON.stringify({ 软件版本: versions.version || require('../../package.json').version, Node: process.version, Electron: versions.electron || process.versions.electron || '未启动桌面运行时', 系统: process.platform, FFmpeg: tools.ffmpeg, ffprobe: tools.ffprobe, 转录模型: { ready: model.exists, sizeBytes: model.sizeBytes }, 路径配置: Object.fromEntries(['videos', 'music', 'output', 'transcripts'].map((key) => [key, Boolean(cleanPath(config[key]))])), 配置摘要: settings, 最近错误: errorCategory([...runLogs].reverse().find((entry) => entry.level === 'error')?.message), 隐私: '已省略用户目录、素材文件名、转录内容和原始错误文本' }, null, 2);

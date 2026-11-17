@@ -359,6 +359,42 @@ async function makeAudio(filePath, frequency, volume = 1, channels = 1) {
   ], { windowsHide: true });
 }
 
+test('saved duration changes leave completed media intact until regeneration and preserve the freeze tail', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-duration-regeneration-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const music = path.join(root, 'music');
+  await fs.mkdir(music);
+  await makeAudio(path.join(music, 'a.wav'), 220);
+  await makeAudio(path.join(music, 'b.wav'), 440);
+  const videos = path.join(root, 'episode.mp4');
+  await makeVideo(videos, 4);
+  const sourceBefore = await fs.readFile(videos);
+  const options = { music, videos, output: path.join(root, 'output'), ffmpeg, ffprobe,
+    strictInstrumental: false, scenePriority: false, transcribe: false, freezeTail: '0:12',
+    maxTrackDuration: 0, maxTracksPerEpisode: 1, fadeIn: 0, fadeOut: 0 };
+  const logger = { log() {}, error() {} };
+  const first = await runBatch(options, logger);
+  assert.equal(first.completed, 1);
+  assert.equal(first.results[0].analysis.segments.length, 1);
+  const audioBefore = await fs.readFile(first.results[0].outputPath);
+  const changed = await runBatch({ ...options, maxTrackDuration: 1.5 }, logger);
+  assert.equal(changed.skipped, 1);
+  assert.deepEqual(await fs.readFile(first.results[0].outputPath), audioBefore);
+  const regenerated = await runBatch({ ...options, maxTrackDuration: 1.5, skipCompleted: false }, logger);
+  assert.equal(regenerated.completed, 1, JSON.stringify(regenerated.results));
+  const result = regenerated.results[0];
+  assert.equal(result.analysis.maxTrackDuration, 1.5);
+  assert.equal(result.analysis.segments.length, 4);
+  assert.equal(result.analysis.segments.at(-1).end, 3.52);
+  assert.deepEqual(await fs.readFile(videos), sourceBefore);
+  assert.ok(await wavRms(result.outputPath, 0.2, 0.4) > 0.001);
+  const final = await probe(result.finalVideoPath);
+  assert.ok(Math.abs(Number(final.format.duration) - 4) < 0.1);
+  const timeline = await fs.readFile(result.timelinePath, 'utf8');
+  assert.match(timeline, /max_track_duration_sec,render_start_sec,render_end_sec/);
+  assert.match(timeline, /单曲连续播放上限 1.5 秒/);
+});
+
 async function makeVideo(filePath, duration = 2.5) {
   await execFileAsync(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-y',
@@ -484,7 +520,7 @@ test('mood rules and interval merging stay deterministic', () => {
     ['08_悲伤_失落离别', ['sad.mp3']],
     ['09_忧郁_阴暗神秘', ['mystery.mp3']],
   ]);
-  const plan = buildMusicPlan({ duration: 60, transcript: null, groups: prefixedGroups, options: { mood: null }, trackUses: new Map() });
+  const plan = buildMusicPlan({ duration: 60, transcript: null, groups: prefixedGroups, options: { mood: null, maxTrackDuration: 0 }, trackUses: new Map() });
   assert.equal(plan.segments.length, 1);
   assert.equal(plan.segments[0].mood, '07_平静_治愈氛围');
   assert.equal(inferMood({ segments: [{ start: 1, end: 2, text: '发现秘密线索' }] }, prefixedGroups).mood, '09_忧郁_阴暗神秘');
@@ -492,7 +528,7 @@ test('mood rules and interval merging stay deterministic', () => {
     duration: 60,
     transcript: null,
     groups: prefixedGroups,
-    options: { mood: null },
+    options: { mood: null, maxTrackDuration: 0 },
     trackUses: new Map(),
     sceneCuts: [{ time: 20, score: 20 }, { time: 30, score: 14 }, { time: 45, score: 16 }],
   });
@@ -501,7 +537,7 @@ test('mood rules and interval merging stay deterministic', () => {
     duration: 60,
     transcript: { segments: [{ start: 1, end: 15, text: '危险快跑' }, { start: 30, end: 50, text: '难过哭泣' }] },
     groups: prefixedGroups,
-    options: { mood: '07_平静_治愈氛围' },
+    options: { mood: '07_平静_治愈氛围', maxTrackDuration: 0 },
     trackUses: new Map(),
   });
   assert.deepEqual(override.segments.map((segment) => segment.mood), ['07_平静_治愈氛围']);
@@ -565,7 +601,7 @@ test('uses only persistent script mood turns and never fills the segment limit b
       { start: 60, end: 85, text: '我很难过，眼泪止不住' },
     ] },
     groups,
-    options: { maxTracksPerEpisode: 3 },
+    options: { maxTracksPerEpisode: 3, maxTrackDuration: 0 },
     trackUses: new Map(),
   });
   assert.deepEqual(plan.segments.map((segment) => segment.mood), ['紧张', '浪漫', '悲伤']);
@@ -580,7 +616,7 @@ test('uses only persistent script mood turns and never fills the segment limit b
       { start: 60, end: 85, text: '我会一直陪着你' },
     ] },
     groups,
-    options: { maxTracksPerEpisode: 3 },
+    options: { maxTracksPerEpisode: 3, maxTrackDuration: 0 },
     trackUses: new Map(),
   });
   assert.deepEqual(oneMood.segments.map(({ requestedMood }) => requestedMood), ['浪漫', '温情']);
@@ -601,7 +637,7 @@ test('ignores a brief isolated emotion mention between longer story sections', (
       { start: 28, end: 55, text: '我爱你，想和你一起生活' },
     ] },
     groups,
-    options: { maxTracksPerEpisode: 3 },
+    options: { maxTracksPerEpisode: 3, maxTrackDuration: 0 },
     trackUses: new Map(),
   });
   assert.equal(plan.segments.length, 1);
@@ -616,7 +652,7 @@ test('recognizes conflict and reconciliation turns in English drama dialogue', (
   ]);
   const plan = (duration, segments) => buildMusicPlan({
     duration, transcript: { segments }, groups,
-    options: { maxTracksPerEpisode: 3 }, trackUses: new Map(),
+    options: { maxTracksPerEpisode: 3, maxTrackDuration: 0 }, trackUses: new Map(),
   });
 
   const conflict = plan(85.378, [
@@ -657,7 +693,7 @@ test('uses mood changes first and enforces the minimum even without mood evidenc
       { start: 10, end: 16, text: '我爱你，我们一直相爱' },
       { start: 62, end: 65, text: '我真的很愤怒，也无法原谅' },
     ] }, groups,
-    options: { minTracksPerEpisode: 2, maxTracksPerEpisode: 3 }, trackUses: new Map(),
+    options: { minTracksPerEpisode: 2, maxTracksPerEpisode: 3, maxTrackDuration: 0 }, trackUses: new Map(),
   });
 
   assert.equal(plan.segments.length, 2);
@@ -667,7 +703,7 @@ test('uses mood changes first and enforces the minimum even without mood evidenc
 
   const oneMood = buildMusicPlan({
     duration: 120, transcript: null, groups,
-    options: { minTracksPerEpisode: 2, maxTracksPerEpisode: 3 }, trackUses: new Map(),
+    options: { minTracksPerEpisode: 2, maxTracksPerEpisode: 3, maxTrackDuration: 0 }, trackUses: new Map(),
   });
   assert.equal(oneMood.segments.length, 1);
   assert.equal(oneMood.trackCount.actual, 1);
@@ -678,7 +714,7 @@ test('uses mood changes first and enforces the minimum even without mood evidenc
 test('scene-priority switch changes music at the episode 15 transition even with one mood', () => {
   const groups = new Map([['默认', ['calm-a.wav', 'calm-b.wav', 'calm-c.wav']]]);
   const sceneCuts = [{ time: 13.566667, score: 17.279, kind: 'cut' }, { time: 18.133333, score: 48.756, kind: 'cut' }, { time: 19.766667, score: 26.315, kind: 'cut' }];
-  const plan = (options) => buildMusicPlan({ duration: 53.310657, transcript: null, groups, sceneCuts, options, trackUses: new Map() });
+  const plan = (options) => buildMusicPlan({ duration: 53.310657, transcript: null, groups, sceneCuts, options: { maxTrackDuration: 0, ...options }, trackUses: new Map() });
   const enabled = plan({ scenePriority: true, minTracksPerEpisode: 1, maxTracksPerEpisode: 3 });
   assert.deepEqual(enabled.segments.map((segment) => segment.start), [0, 18.133333]);
   assert.equal(enabled.trackCount.actual, 2);
@@ -703,7 +739,7 @@ test('custom music limits above the default reach real planning instead of stopp
 test('minimum picks different compatible songs, uses pauses and reports impossible requests', () => {
   const groups = new Map([['默认', ['calm-a.wav', 'calm-b.wav', 'calm-c.wav']], ['紧张', ['tense.wav']]]);
   const plan = (options = {}, transcript = null, duration = 60, choices = groups) => buildMusicPlan({ duration, transcript, groups: choices,
-    options: { scenePriority: false, minTracksPerEpisode: 2, maxTracksPerEpisode: 3, ...options }, trackUses: new Map() });
+    options: { scenePriority: false, minTracksPerEpisode: 2, maxTracksPerEpisode: 3, maxTrackDuration: 0, ...options }, trackUses: new Map() });
   const paused = plan({}, { segments: [{ start: 1, end: 15, text: 'Hello.' }, { start: 20, end: 55, text: 'We should talk.' }] });
   assert.equal(paused.segments[1].start, 17.5);
   assert.match(paused.segments[1].reason, /停顿/);
@@ -730,7 +766,7 @@ test('minimum picks different compatible songs, uses pauses and reports impossib
 test('required scene switches keep close transitions and override the cap without adjacent track reuse', () => {
   const groups = new Map([['默认', Array.from({ length: 5 }, (_, index) => `calm-${index}.wav`)]]);
   const sceneCuts = [12, 13, 24, 36, 48].map((time) => ({ time, score: 50, kind: 'cut' }));
-  const plan = (options) => buildMusicPlan({ duration: 60, transcript: null, groups, sceneCuts, options, trackUses: new Map() });
+  const plan = (options) => buildMusicPlan({ duration: 60, transcript: null, groups, sceneCuts, options: { maxTrackDuration: 0, ...options }, trackUses: new Map() });
   const capped = plan({ maxTracksPerEpisode: 3 });
   assert.equal(capped.segments.length, 6);
   assert.ok(capped.sceneCandidates.every((cut) => cut.required && cut.used));
@@ -772,7 +808,7 @@ test('required scenes report missing alternative music instead of silently conti
   const groups = new Map([['默认', ['only.wav']], ['紧张', ['unrelated.wav']]]);
   assert.throws(() => buildMusicPlan({ duration: 60, transcript: null, groups, options: { scenePriority: true },
     trackUses: new Map(), sceneCuts: [{ time: 20, score: 50, kind: 'cut' }] }), /20 秒处必须换曲.*没有另一首/);
-  const allowed = buildMusicPlan({ duration: 60, transcript: null, groups, options: { scenePriority: false },
+  const allowed = buildMusicPlan({ duration: 60, transcript: null, groups, options: { scenePriority: false, maxTrackDuration: 0 },
     trackUses: new Map(), sceneCuts: [{ time: 20, score: 50, kind: 'cut' }] });
   assert.equal(allowed.segments.length, 1);
 });
@@ -1228,7 +1264,7 @@ test('similar-style intent changes continue a nonstationary track instead of rep
       { start: 25, end: 36, text: 'A secret clue. We need to find out.' },
       { start: 45, end: 56, text: 'I love you. You mean everything to me.' },
     ] },
-    options: { scenePriority: true },
+    options: { scenePriority: true, maxTrackDuration: 0 },
     trackUses: new Map(),
   });
   assert.deepEqual(plan.segments.map(({ requestedMood }) => requestedMood), ['紧张', '悬疑', '浪漫']);
@@ -1237,7 +1273,7 @@ test('similar-style intent changes continue a nonstationary track instead of rep
     const args = ['-hide_banner', '-loglevel', 'error', '-y'];
     for (const segment of plan.segments) args.push('-stream_loop', '-1', '-i', segment.track);
     args.push('-filter_complex', buildMultiTrackFilter(plan.segments, 60,
-      { fadeIn: 0, fadeOut: 0, transitionFadeEnabled }, [], false),
+      { fadeIn: 0, fadeOut: 0, transitionFadeEnabled, maxTrackDuration: 0 }, [], false),
     '-map', '[aout]', '-t', '60', '-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', output);
     await execFileAsync(ffmpeg, args, { windowsHide: true });
     const wav = await fs.readFile(output);

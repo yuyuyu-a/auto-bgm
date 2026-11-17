@@ -26,7 +26,7 @@ test('word timestamps survive normalization; old transcripts are never divided b
   const normalized = normalizeTranscript({ segments: [{ ...old, words: [{ start: 1, end: 8, word: 'I love you,' }, { start: 32, end: 35, word: ' but' }, { start: 35, end: 56, word: ' how dare you!' }] }] }, 60);
   assert.equal(normalized[0].words[1].start, 32);
   assert.equal(normalizeTranscript({ segments: [{ ...old, words: [{ start: 0, end: 1, word: 'I' }, { start: 10, end: 99, word: 'love you' }] }] }, 60)[0].words, undefined);
-  const plan = (segments) => buildMusicPlan({ duration: 60, transcript: { segments }, groups, options: {}, trackUses: new Map() });
+  const plan = (segments) => buildMusicPlan({ duration: 60, transcript: { segments }, groups, options: { maxTrackDuration: 0 }, trackUses: new Map() });
   assert.equal(plan([old]).segments.length, 1);
   const precise = plan(normalized);
   assert.deepEqual(precise.segments.map((segment) => segment.mood), ['浪漫', '愤怒']);
@@ -38,7 +38,7 @@ test('scene candidates deduplicate shots and preserve the emotion-first behavior
   const parsed = parseSceneCandidates('lavfi.scd.score: 25, lavfi.scd.time: 0.03\nlavfi.scd.score: 15, lavfi.scd.time: 20\nlavfi.scd.score: 30, lavfi.scd.time: 20.2\nblack_start:39 black_end:40 black_duration:1', 60);
   assert.deepEqual(parsed.map((cut) => cut.time), [20, 40]);
   assert.equal(parsed[0].score, 30);
-  const plan = buildMusicPlan({ duration: 60, transcript: null, groups, options: { scenePriority: false }, trackUses: new Map(), sceneCuts: parsed });
+  const plan = buildMusicPlan({ duration: 60, transcript: null, groups, options: { scenePriority: false, maxTrackDuration: 0 }, trackUses: new Map(), sceneCuts: parsed });
   assert.equal(plan.segments.length, 1);
   assert.equal(plan.sceneCandidates.length, 2);
   assert.ok(plan.sceneCandidates.every((cut) => !cut.used));
@@ -65,11 +65,11 @@ test('sustained conflict ends at a shot with a long pause; cuts alone keep the s
     { start: 30, end: 33, text: 'All the babies are stable for now.' },
     { start: 36, end: 40, text: 'Is there any danger? We will monitor you.' },
   ] };
-  const plan = (sceneCuts) => buildMusicPlan({ duration: 55, transcript, groups, options: {}, trackUses: new Map(), sceneCuts });
+  const plan = (sceneCuts) => buildMusicPlan({ duration: 55, transcript, groups, options: { maxTrackDuration: 0 }, trackUses: new Map(), sceneCuts });
   assert.deepEqual(plan([{ time: 29.9, kind: 'cut', score: 15 }]).segments.map((segment) => segment.mood), ['愤怒', '默认']);
   assert.equal(plan([{ time: 29.9, kind: 'cut', score: 15 }]).segments[1].start, 29.9);
   assert.equal(plan([{ time: 24.5, kind: 'cut', score: 15 }]).segments.length, 1);
-  const isolated = buildMusicPlan({ duration: 60, transcript: { segments: [{ start: 1, end: 2, text: 'Back off.' }, { start: 40, end: 42, text: 'Stop making a scene.' }] }, groups, options: {}, trackUses: new Map() });
+  const isolated = buildMusicPlan({ duration: 60, transcript: { segments: [{ start: 1, end: 2, text: 'Back off.' }, { start: 40, end: 42, text: 'Stop making a scene.' }] }, groups, options: { maxTrackDuration: 0 }, trackUses: new Map() });
   assert.equal(isolated.segments[0].mood, '默认');
 });
 

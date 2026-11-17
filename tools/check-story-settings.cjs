@@ -110,14 +110,16 @@ app.whenReady().then(async () => {
 
     const screenshots = path.resolve(__dirname, '../build/ux-verification');
     await fs.mkdir(screenshots, { recursive: true });
+    const captureScreenshots = !process.argv.includes('--no-screenshots');
+    if (!captureScreenshots) console.warn('SKIP: API-settings screenshots explicitly disabled; IPC, encryption and DOM layout assertions remain enabled.');
     await js('document.querySelector(".story-ai-settings").scrollIntoView()');
-    await fs.writeFile(path.join(screenshots, 'api-settings-desktop.png'),
+    if (captureScreenshots) await fs.writeFile(path.join(screenshots, 'api-settings-desktop.png'),
       (await window.webContents.capturePage()).toPNG());
     window.setContentSize(760, 520);
     await js('document.querySelector(".story-ai-settings").scrollIntoView()');
     assert.equal(await js('screen.scrollWidth <= screen.clientWidth'), true);
     assert.equal(await js('[...document.querySelectorAll(".story-ai-settings button")].every(node => node.scrollWidth <= node.clientWidth)'), true);
-    await fs.writeFile(path.join(screenshots, 'api-settings-minimum.png'),
+    if (captureScreenshots) await fs.writeFile(path.join(screenshots, 'api-settings-minimum.png'),
       (await window.webContents.capturePage()).toPNG());
     assert.equal(requests.every(({ method, url }) => method === 'GET' && url.endsWith('/models')), true);
     const replacement = 'local-settings-replacement-only';

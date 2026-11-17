@@ -22,7 +22,7 @@ app.whenReady().then(async () => {
     const execute = promisify(execFile);
     await execute(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x240:r=25:d=5', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=5', '-c:v', 'libvpx', '-c:a', 'libopus', '-shortest', media], { windowsHide: true });
     await execute(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-i', media, '-vn', '-c:a', 'pcm_s16le', audio], { windowsHide: true });
-    const defaults = { videos: media, music: root, output: root, modelPath: root, transcribe: false, outputAudio: true, outputVideo: true, outputTimeline: true, outputTranscript: false, minTracksPerEpisode: 1, maxTracksPerEpisode: 3, skipCompleted: true };
+    const defaults = { videos: media, music: root, output: root, modelPath: root, transcribe: false, outputAudio: true, outputVideo: true, outputTimeline: true, outputTranscript: false, minTracksPerEpisode: 1, maxTracksPerEpisode: 3, maxTrackDuration: require('../desktop/backend/batch-service').getInfo().defaults.maxTrackDuration, skipCompleted: true };
     const run = { config: defaults, startedAt: Date.now(), total: 60, currentIndex: 12, currentEpisode: '第12集', currentStage: 'rendering-video', settled: 11, counts: { completed: 9, skipped: 1, failed: 1, interrupted: 0 }, status: 'running', estimatedRemainingMs: null };
     const rows = Array.from({ length: 60 }, (_, i) => ({ episode: `第${i + 1}集`, status: i === 49 ? 'failed' : i < 11 ? 'completed' : 'pending', videoPath: media, duration: 5, tracks: ['calm.wav'] }));
     const detail = { episode: '第1集', duration: 5, status: 'completed', mood: '平静 → 紧张', finalVideoExists: true, finalVideoPath: media, finalVideoUrl: pathToFileURL(media).href, outputPath: audio, audioUrl: pathToFileURL(audio).href, timelinePath: '', transcriptPath: '', transcript: [{ start: .2, end: .8, text: '第一句' }, { start: 1.2, end: 1.8, text: '小心，快跑' }], timeline: [{ start: 0, end: 1, mood: '平静', bgm_file: 'calm.wav', selection_reason: '开场对白', duckSegments: [] }, { start: 1, end: 5, mood: '紧张', bgm_file: 'tense.wav', selection_reason: '危险关键词', duckSegments: [{ start: 1.2, end: 1.8 }] }] };
@@ -34,7 +34,8 @@ app.whenReady().then(async () => {
       { file: path.join(root, 'suspect.wav'), fileUrl: pathToFileURL(audio).href, playable: true, eligible: false, status: 'unknown', analysis: { intervals: [{ start: 1.2, end: 1.8, label: 'Humming' }] } },
       { file: path.join(root, 'instrumental.wav'), fileUrl: pathToFileURL(audio).href, playable: true, eligible: true, status: 'instrumental' },
     ] };
-    await fs.writeFile(path.join(root, 'fixture.json'), JSON.stringify({ info: { defaults, running: true, run, version: 'test', logs: [] }, batch, detail, library }));
+    const fixture = { info: { defaults, running: true, run, version: 'test', logs: [] }, batch, detail, library };
+    await fs.writeFile(path.join(root, 'fixture.json'), JSON.stringify(fixture));
     window = new BrowserWindow({ show: false, width: 1440, height: 900, webPreferences: { preload: path.join(__dirname, 'check-workbench-preload.cjs'), additionalArguments: [`--bgm-test-root=${root}`], contextIsolation: true, sandbox: false, backgroundThrottling: false } });
     window.webContents.setAudioMuted(true);
     const errors = [];
@@ -107,6 +108,11 @@ app.whenReady().then(async () => {
     await js('document.querySelector(".nav-item[data-view=settings]").click(); window.settingsInput=document.getElementById("config-minTracksPerEpisode"); settingsInput.focus(); workbenchTest.emitBatch({type:"progress",episode:"第12集",status:"processing"});');
     await new Promise((resolve) => setTimeout(resolve, 350));
     assert.equal(await js('settingsInput === document.activeElement'), true);
+    assert.equal(await js('document.getElementById("config-maxTrackDuration")?.type'), 'number');
+    assert.equal(await js('document.getElementById("config-maxTrackDuration").value'), '40');
+    assert.equal(await js('document.getElementById("config-maxTrackDuration").disabled'), false);
+    assert.match(await js('document.getElementById("track-duration-status").textContent'), /40.*秒/);
+    assert.match(await js('document.getElementById("screen").textContent'), /已完成.*不会自动|不会自动.*已完成/);
     assert.equal(await js('document.getElementById("config-scenePriority").checked'), true);
     assert.equal(await js('document.getElementById("music-limit-unlimited").checked'), true);
     assert.equal(await js('document.getElementById("config-maxTracksPerEpisode").disabled'), true);
@@ -138,6 +144,74 @@ app.whenReady().then(async () => {
     assert.equal(await js('workbenchTest.calls().filter(call => call.action === "start").length'), 0);
     await js('workbenchTest.emitBatch({type:"finished",summary:{completed:9,skipped:1,failed:1},run:{...state.run,status:"finished",currentStage:"finished"}})');
     await waitFor('document.getElementById("top-start").textContent === "开始批次"');
+    fixture.info.running = false;
+    fixture.info.run = { ...run, status: 'finished', currentStage: 'finished' };
+    await fs.writeFile(path.join(root, 'fixture.json'), JSON.stringify(fixture));
+    const reloadSettings = async () => {
+      await window.reload();
+      await waitFor('document.querySelectorAll("#queue-body tr").length === 60');
+      await js('document.querySelector(".nav-item[data-view=settings]").click()');
+    };
+    await js('delete state.config.maxTrackDuration; saveConfig()');
+    await reloadSettings();
+    assert.equal(await js('document.getElementById("config-maxTrackDuration").value'), '40',
+      'Old saved settings without a duration must use the 40-second default');
+    assert.equal(await js('state.config.skipCompleted'), true);
+    assert.equal(await js('workbenchTest.calls().filter(call => call.action === "start").length'), 0);
+    for (const value of ['', '-1']) {
+      await js(`{ const input=document.getElementById("config-maxTrackDuration"); input.value=${JSON.stringify(value)}; input.dispatchEvent(new Event("input",{bubbles:true})); }`);
+      assert.equal(await js('state.config.maxTrackDuration'), value === '' ? '' : -1);
+      assert.equal(await js('document.getElementById("config-maxTrackDuration").validity.valid'), false);
+      assert.match(await js('document.getElementById("track-duration-status").textContent'), /非负数字/);
+    }
+    const durationPayloads = [];
+    for (const seconds of [40, 37.5, 0]) {
+      await js(`{ const input=document.getElementById("config-maxTrackDuration"); input.value="${seconds}"; input.dispatchEvent(new Event("input",{bubbles:true})); }`);
+      assert.equal(await js('state.config.maxTrackDuration'), seconds);
+      assert.equal(await js('JSON.parse(localStorage.getItem("bgm-studio-config")).maxTrackDuration'), seconds);
+      assert.match(await js('document.getElementById("track-duration-status").textContent'),
+        seconds === 0 ? /不限制/ : new RegExp(`${seconds}.*秒`));
+      await js('document.getElementById("config-maxTrackDuration").dispatchEvent(new Event("change",{bubbles:true}))');
+      await reloadSettings();
+      assert.equal(await js('document.getElementById("config-maxTrackDuration").value'), String(seconds));
+      assert.equal(await js('typeof state.config.maxTrackDuration'), 'number');
+      assert.equal(await js('document.getElementById("config-maxTrackDuration").disabled'), false);
+      assert.match(await js('document.getElementById("track-duration-status").textContent'),
+        seconds === 0 ? /不限制/ : new RegExp(`${seconds}.*秒`));
+      assert.equal(await js('workbenchTest.calls().filter(call => call.action === "start").length'), 0,
+        'Saving and reloading settings must not regenerate completed outputs');
+      window.setContentSize(1440, 900);
+      await js('document.getElementById("config-maxTrackDuration").scrollIntoView({block:"center"})');
+      await capture(`track-duration-${seconds}-desktop.png`);
+      window.setContentSize(760, 520);
+      await waitFor('document.getElementById("screen").scrollWidth <= document.getElementById("screen").clientWidth');
+      await js('document.getElementById("config-maxTrackDuration").scrollIntoView({block:"center"})');
+      assert.equal(await js('(() => { const input=document.getElementById("config-maxTrackDuration").getBoundingClientRect(); const status=document.getElementById("track-duration-status").getBoundingClientRect(); return input.left >= 0 && input.right <= innerWidth && input.bottom <= status.top; })()'), true);
+      await capture(`track-duration-${seconds}-minimum.png`);
+      await js('document.querySelector(".nav-item[data-view=desk]").click(); document.getElementById("top-start").click()');
+      await waitFor('!state.starting && workbenchTest.calls().some(call => call.action === "start")');
+      const payload = await js('workbenchTest.calls().find(call => call.action === "start").config');
+      assert.equal(payload.maxTrackDuration, seconds);
+      assert.equal(payload.skipCompleted, true);
+      assert.equal(payload.overwrite, false);
+      durationPayloads.push(payload);
+      await js('workbenchTest.emitBatch({type:"finished",summary:{completed:9,skipped:1,failed:1},run:{...state.run,status:"finished",currentStage:"finished"}})');
+      await waitFor('document.getElementById("top-start").textContent === "开始批次"');
+      await js('document.querySelector(".nav-item[data-view=settings]").click()');
+    }
+    await js('document.querySelector("[data-config-key=transitionFadeEnabled]").click()');
+    assert.equal(await js('document.getElementById("config-transitionFadeDuration").disabled'), true);
+    assert.equal(await js('document.getElementById("config-maxTrackDuration").disabled'), false,
+      'The track duration limit must remain editable when transition fades are disabled');
+    await js('document.querySelector("[data-config-key=transitionFadeEnabled]").click()');
+    for (const [stored, expected] of [['0', 0], [' 27.25 ', 27.25], ['', 40], [null, 40], [false, 40], [true, 40], [-1, 40], ['Infinity', 40]]) {
+      await js(`localStorage.setItem("bgm-studio-config", JSON.stringify({...state.config,maxTrackDuration:${JSON.stringify(stored)}}))`);
+      assert.equal(await js('loadConfig(state.defaults).maxTrackDuration'), expected);
+    }
+    await js('saveConfig(); document.querySelector(".nav-item[data-view=desk]").click()');
+    assert.doesNotMatch(await js('document.querySelector(".config-details").textContent'), /曲目不足时.*留白/);
+    await fs.writeFile(path.join(screenshots, 'track-duration-payloads.json'), JSON.stringify(durationPayloads, null, 2));
+    window.setContentSize(1440, 900);
     await js('document.querySelector("[data-action=check-library]").click()');
     await waitFor('document.querySelectorAll(".library-track").length === 2');
     assert.match(await js('document.querySelector(".library-health").textContent'), /已跳过同名副本 1 份/);
@@ -196,7 +270,7 @@ app.whenReady().then(async () => {
     assert.equal(await js('document.getElementById("top-start").disabled'), true);
     assert.match(await js('document.getElementById("preflight-content").textContent'), /选择视频目录/);
     assert.equal(errors.length, 0, errors.join('\n'));
-    console.log('Desktop UI checks passed: reload recovery, 60-row filtering, stable editing/media, segment playback, timeline seeking, presets, diagnostics, accessibility and narrow layout.');
+    console.log('Desktop UI checks passed: track duration default40/custom37.5/unlimited0 save and reload, numeric batch payloads, reload recovery, 60-row filtering, stable editing/media, segment playback, timeline seeking, presets, diagnostics, accessibility and narrow layout.');
     console.log(`Screenshots: ${screenshots}`);
     window.destroy();
     app.exit(0);

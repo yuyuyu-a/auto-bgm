@@ -198,6 +198,65 @@ test('custom music limits accept arbitrary integer values and keep invalid value
     /下限不能高于上限/);
 });
 
+test('continuous track duration defaults to 40 and preflight normalizes finite nonnegative seconds', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-track-duration-config-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const base = { videos: root, music: root, output: path.join(root, 'output'), transcribe: false };
+  assert.equal(getInfo().defaults.maxTrackDuration, 40);
+  for (const [input, expected] of [[undefined, 40], [0, 0], ['0', 0], [37.5, 37.5], [' 37.5 ', 37.5], ['1e2', 100]]) {
+    const info = await inspectBatch({ ...base, maxTrackDuration: input });
+    assert.equal(info.validationError, '', `valid duration ${String(input)}`);
+    assert.equal(info.config.maxTrackDuration, expected);
+    assert.equal(typeof info.config.maxTrackDuration, 'number');
+  }
+  assert.equal((await inspectBatch(base)).config.maxTrackDuration, 40);
+  await assert.rejects(fs.stat(base.output), { code: 'ENOENT' });
+});
+
+test('continuous track duration rejects coercible blanks, booleans and invalid numbers before a batch starts', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-track-duration-invalid-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const base = { videos: root, music: root, output: path.join(root, 'output'), transcribe: false };
+  for (const value of ['', ' \t ', null, true, false, -1, '-0.1', Infinity, -Infinity, NaN, 'Infinity', '40 seconds', [], {}]) {
+    const input = { ...base, maxTrackDuration: value };
+    assert.match((await inspectBatch(input)).validationError, /单曲.*时长.*非负数字/, `invalid duration ${String(value)}`);
+    const events = [];
+    await assert.rejects(startBatch(input, (event) => events.push(event)), /单曲.*时长.*非负数字/);
+    assert.equal(events.length, 0);
+    assert.equal(getInfo().running, false);
+  }
+  await assert.rejects(fs.stat(base.output), { code: 'ENOENT' });
+});
+
+test('continuous track duration reaches started batches and restored run configuration as a number', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-track-duration-batch-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const base = { videos: root, music: root, output: root, transcribe: false, skipCompleted: true, overwrite: false };
+  for (const [input, expected] of [[undefined, 40], ['0', 0], [' 37.5 ', 37.5]]) {
+    const events = [];
+    await startBatch({ ...base, maxTrackDuration: input }, (event) => events.push(event));
+    stopBatch();
+    for (let attempt = 0; attempt < 100 && getInfo().running; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(getInfo().running, false);
+    assert.equal(events.at(-1).type, 'stopped');
+    const config = events.find((event) => event.type === 'started').config;
+    assert.equal(config.maxTrackDuration, expected);
+    assert.equal(getInfo().run.config.maxTrackDuration, expected);
+    assert.equal(config.skipCompleted, true);
+    assert.equal(config.overwrite, false);
+  }
+});
+
+test('continuous track duration diagnostics expose numeric seconds without leaking invalid input', async () => {
+  for (const [input, expected] of [[undefined, 40], [0, 0], [' 37.5 ', 37.5], ['', '未设置'], [null, '未设置'], [false, '未设置'], [-1, '未设置'], ['PRIVATE_DURATION_SECRET', '未设置']]) {
+    const text = await diagnostics({ maxTrackDuration: input, apiKey: 'PRIVATE_API_SECRET' });
+    assert.equal(JSON.parse(text).配置摘要.maxTrackDuration, expected);
+    assert.doesNotMatch(text, /PRIVATE_DURATION_SECRET|PRIVATE_API_SECRET|apiKey/);
+  }
+});
+
 test('story desktop preflight enables local transcription and returns cloneable public readiness only', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-story-preflight-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

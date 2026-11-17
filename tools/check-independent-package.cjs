@@ -33,7 +33,7 @@ app.whenReady().then(async () => {
     'desktop/update-service.js', 'desktop/story-ai-settings.js',
     'desktop/renderer/index.html', 'desktop/renderer/renderer.js', 'desktop/renderer/styles.css',
     'desktop/backend/batch-service.js', 'src/mvp.js', 'src/story-director.js',
-    'src/music-dedup.js', 'src/music-library.js', 'src/music-selection.js', 'src/story-music-plan.js',
+    'src/music-dedup.js', 'src/music-library.js', 'src/music-selection.js', 'src/story-music-plan.js', 'src/track-duration.js',
   ]) {
     // Git may normalize working-tree newlines after switching branches.
     assert.equal((await fs.readFile(path.join(source, file), 'utf8')).replace(/\r\n/g, '\n'),
@@ -59,7 +59,41 @@ app.whenReady().then(async () => {
   const { createStoryAISettings } = require(path.join(source, 'desktop/story-ai-settings'));
   const { requestStoryPlan } = require(path.join(source, 'src/story-director'));
   const { buildMusicPlan, runBatch, scanMusic } = require(path.join(source, 'src/mvp'));
+  const { playbackWindows } = require(path.join(source, 'src/track-duration'));
   const { checkMusicLibrary, inspectBatch } = require(path.join(source, 'desktop/backend/batch-service'));
+  const durationMusic = path.join(fixture, 'duration-music');
+  await fs.mkdir(durationMusic);
+  for (const [name, frequency] of [['a.wav', 220], ['b.wav', 440]]) {
+    await execute(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i',
+      `sine=frequency=${frequency}:duration=2`, path.join(durationMusic, name)], { windowsHide: true });
+  }
+  const durationGroups = await scanMusic(durationMusic);
+  const defaultDurationPlan = buildMusicPlan({ duration: 95, groups: durationGroups,
+    trackUses: new Map(), options: { scenePriority: false, maxTracksPerEpisode: 1 } });
+  assert.equal(defaultDurationPlan.segments.length, 3);
+  assert.notEqual(defaultDurationPlan.segments[0].track, defaultDurationPlan.segments[1].track);
+  assert.ok(playbackWindows(defaultDurationPlan.segments, 95, {}).every((span) =>
+    span.renderEnd - span.renderStart <= 40 + 1e-9));
+  const durationResult = await runBatch({
+    videos: video, music: durationMusic, output: path.join(fixture, 'duration-output'),
+    ffmpeg, ffprobe, strictInstrumental: false, transcribe: false, scenePriority: false,
+    maxTracksPerEpisode: 1, maxTrackDuration: 1.5, freezeTail: '0:12',
+    outputVideo: false, outputAudio: true, outputTimeline: true, outputTranscript: false,
+  }, { log() {}, error() {} });
+  assert.equal(durationResult.failed, 0, JSON.stringify(durationResult.results));
+  assert.equal(durationResult.completed, 1);
+  const capped = durationResult.results[0];
+  assert.equal(capped.analysis.maxTrackDuration, 1.5);
+  assert.ok(capped.analysis.segments.length > 1);
+  const cappedEnd = capped.analysis.segments.at(-1).end;
+  assert.ok(Math.abs(cappedEnd - (capped.duration - 0.48)) < 0.001);
+  assert.ok(playbackWindows(capped.analysis.segments, cappedEnd, { maxTrackDuration: 1.5 })
+    .every((span) => span.renderEnd - span.renderStart <= 1.5 + 1e-9));
+  const cappedTimeline = await fs.readFile(capped.timelinePath, 'utf8');
+  assert.match(cappedTimeline, /max_track_duration_sec,render_start_sec,render_end_sec/);
+  const cappedPcm = await execute(ffmpeg, ['-v', 'error', '-i', capped.outputPath,
+    '-f', 's16le', '-ar', '48000', '-ac', '1', 'pipe:1'], { encoding: 'buffer', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  assert.ok(cappedPcm.stdout.some((value) => value !== 0));
   const dedupMusic = path.join(fixture, 'same-name-music');
   const representative = path.join(dedupMusic, 'album2', 'theme.wav');
   const duplicate = path.join(dedupMusic, 'album10', 'THEME.WAV');

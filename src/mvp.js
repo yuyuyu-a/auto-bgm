@@ -9,12 +9,13 @@ const { assertStoryTranscript, buildStoryMusicPlan, publicStoryProfile } = requi
 const { loadStoryDocument, STORY_EXTENSIONS } = require('./story-input');
 const { deduplicateMusic } = require('./music-dedup');
 const { canonicalMood, chooseTrack, describeTrackSelection, findCompatibleMoodFolder, findMoodFolder, selectionReason } = require('./music-selection');
+const { DEFAULT_MAX_TRACK_DURATION, DEFAULT_TRANSITION_FADE_SECONDS, enforceTrackDuration, maxTrackDuration, playbackWindows, transitionFadeSeconds } = require('./track-duration');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
 const DEFAULT_MOOD = '默认';
 const STATE_VERSION = 14;
-const PLANNING_VERSION = 'similar-music-fallback-v6';
+const PLANNING_VERSION = 'single-track-duration-v7';
 
 const MOOD_RULES = [
   { mood: '紧张', words: ['危险', '追杀', '逃跑', '快跑', '小心', '冲突', '打架', '绑架', '枪', '杀', '来不及', '怎么办', '救命', '别过来', 'danger', 'chase', 'run away', 'hurry', 'hurry up', 'careful', 'kidnap', 'kidnapped', 'gun', 'kill', 'killed', 'fight', 'fighting', "we're running out of time", 'what do we do', "don't come", "i'm scared", "i'm afraid", 'please help', 'help me', 'get out of here', 'we have to go', "they're coming", "we're trapped"] },
@@ -30,7 +31,29 @@ const MOOD_RULES = [
 ];
 
 function usage() {
-  return `用法:\n  node src/cli.js --videos <视频文件或目录> --music <BGM目录> --output <输出目录> [选项]\n\n选项:\n  --transcripts <目录>  读取与视频同名的 JSON 字幕时间段\n  --transcribe           调用 tools/transcribe.py + faster-whisper（需另行安装 Python/依赖）\n  --mood <标签>          覆盖自动情绪判断，必须匹配 BGM 子目录\n  --allow-unverified-music  允许未确认曲目（默认严格纯音乐，首次分析请用桌面版）\n  --no-auto-duck         关闭默认开启的对白压低\n  --duck-db <-10>        对白时 BGM 增益，默认 -10\n  --freeze-tail <秒:帧>  片尾定格时长，定格期间不铺 BGM，默认 0:00\n  --fade-in <秒>         首部淡入，默认 2\n  --fade-out <秒>        尾部淡出，默认 2\n  --overwrite            明确允许覆盖已有输出\n  --ffmpeg <路径>        指定 ffmpeg 可执行文件\n  --ffprobe <路径>       指定 ffprobe 可执行文件\n  --help                 显示帮助\n\n输出文件: <集名>_final.<原视频扩展名>（原视频画面 + 原音 + BGM）、_bgm.wav、_timeline.csv、_transcript.json。\nBGM 目录约定:\n  BGM/悬疑/*.mp3   BGM/紧张/*.wav   BGM/默认/*.mp3\n  也支持直接放在 BGM/ 根目录，根目录曲目视为“默认”。`;
+  return `用法:
+  node src/cli.js --videos <视频文件或目录> --music <BGM目录> --output <输出目录> [选项]
+
+选项:
+  --transcripts <目录>  读取与视频同名的 JSON 字幕时间段
+  --transcribe           调用 tools/transcribe.py + faster-whisper（需另行安装 Python/依赖）
+  --mood <标签>          覆盖自动情绪判断，必须匹配 BGM 子目录
+  --allow-unverified-music  允许未确认曲目（默认严格纯音乐，首次分析请用桌面版）
+  --no-auto-duck         关闭默认开启的对白压低
+  --duck-db <-10>        对白时 BGM 增益，默认 -10
+  --freeze-tail <秒:帧>  片尾定格时长，定格期间不铺 BGM，默认 0:00
+  --max-track-duration <秒>  单曲连续播放上限，含淡出，默认 40；0 不限制
+  --fade-in <秒>         首部淡入，默认 2
+  --fade-out <秒>        尾部淡出，默认 2
+  --overwrite            明确允许覆盖已有输出
+  --ffmpeg <路径>        指定 ffmpeg 可执行文件
+  --ffprobe <路径>       指定 ffprobe 可执行文件
+  --help                 显示帮助
+
+输出文件: <集名>_final.<原视频扩展名>（原视频画面 + 原音 + BGM）、_bgm.wav、_timeline.csv、_transcript.json。
+BGM 目录约定:
+  BGM/悬疑/*.mp3   BGM/紧张/*.wav   BGM/默认/*.mp3
+  也支持直接放在 BGM/ 根目录，根目录曲目视为“默认”。`;
 }
 
 function parseArgs(argv) {
@@ -47,6 +70,7 @@ function parseArgs(argv) {
     freezeTail: '0:00',
     fadeIn: 2,
     fadeOut: 2,
+    maxTrackDuration: DEFAULT_MAX_TRACK_DURATION,
     overwrite: false,
     ffmpeg: process.env.FFMPEG || 'ffmpeg',
     ffprobe: process.env.FFPROBE || 'ffprobe',
@@ -66,7 +90,8 @@ function parseArgs(argv) {
     const value = argv[++i];
     if (value === undefined || value.startsWith('--')) throw new Error(`${arg} 缺少值`);
     if (!(key in options)) throw new Error(`无法识别参数: ${arg}`);
-    if (['duckDb', 'fadeIn', 'fadeOut'].includes(key)) {
+    if (['duckDb', 'fadeIn', 'fadeOut', 'maxTrackDuration'].includes(key)) {
+      if (key === 'maxTrackDuration' && !value.trim()) throw new Error(`${arg} 必须是有效数字`);
       options[key] = Number(value);
       if (!Number.isFinite(options[key]) || options[key] < 0 && key !== 'duckDb') {
         throw new Error(`${arg} 必须是有效数字`);
@@ -520,7 +545,6 @@ function inferMood(transcript, groups, override) {
   return { mood: fallback, review: true, reason: fallback ? '情绪证据不足，使用中性回退，待试听' : '情绪证据不足且无中性曲目，使用曲库中较克制的候选，待试听' };
 }
 
-const DEFAULT_TRANSITION_FADE_SECONDS = 1;
 
 function classifyMoodText(text, groups) {
   const result = moodCandidates(text, groups)[0];
@@ -597,6 +621,11 @@ function sectionReason(classified, start, end, options) {
 }
 
 function buildMusicPlan(context) {
+  maxTrackDuration(context.options);
+  return enforceTrackDuration(buildUnboundedMusicPlan(context), context);
+}
+
+function buildUnboundedMusicPlan(context) {
   const { duration, transcript, groups, options, trackUses, sceneCuts = [] } = context;
   if (options.storyEnabled) return buildStoryMusicPlan({ ...context, planningVersion: PLANNING_VERSION }, chooseTrack);
   const scenePriority = options.scenePriority !== false;
@@ -794,51 +823,30 @@ function buildDuckExpression(intervals, duckDb) {
   }, '1');
 }
 
-function transitionFadeSeconds(options) {
-  const requested = Number(options?.transitionFadeDuration);
-  return Number.isFinite(requested) ? Math.max(0, requested) : DEFAULT_TRANSITION_FADE_SECONDS;
-}
-
-function playbackSpans(segments) {
-  const spans = [];
-  for (const [inputIndex, segment] of segments.entries()) {
-    const previous = spans.at(-1);
-    if (segment.continueTrack && previous?.track && previous.track === segment.track &&
-      !segment.explicitSilence && !previous.explicitSilence && !segment.transition?.required &&
-      previous.end === segment.start && (previous.cueIn || 0) === (segment.cueIn || 0)) {
-      previous.end = segment.end;
-    } else spans.push({ ...segment, inputIndex });
-  }
-  return spans;
-}
-
 function buildMultiTrackFilter(segments, duration, options, intervals, hasDialogue = true) {
   // Keep intent segments in artifacts, but render an unchanged track continuously.
-  segments = playbackSpans(segments);
-  const shortest = Math.min(...segments.map((segment) => segment.end - segment.start));
-  const crossfade = segments.length > 1 && options.transitionFadeEnabled !== false
-    ? Math.min(transitionFadeSeconds(options), shortest / 2)
-    : 0;
+  segments = playbackWindows(segments, duration, options);
   const graph = [];
   segments.forEach((segment, index) => {
-    const silenceBefore = segment.explicitSilence || segments[index - 1]?.explicitSilence;
-    const silenceAfter = segment.explicitSilence || segments[index + 1]?.explicitSilence;
-    const renderStart = index === 0 ? 0 : silenceBefore ? segment.start : Math.max(0, segment.start - crossfade / 2);
-    const renderEnd = index === segments.length - 1 ? duration : silenceAfter ? segment.end : Math.min(duration, segment.end + crossfade / 2);
+    const { renderStart, renderEnd, fadeIn, fadeOut } = segment;
     const renderDuration = renderEnd - renderStart;
+    const startSample = Math.ceil(renderStart * 48000 - 1e-7);
+    const endSample = Math.floor(renderEnd * 48000 + 1e-7);
+    const sampleCount = endSample - startSample;
+    if (sampleCount < 1) throw new Error('单曲时长或配乐片段短于一个音频采样点，请增大单曲连续播放时长后重试。');
     const localIntervals = clipIntervals(intervals, renderStart, renderEnd)
       .map((interval) => ({ start: interval.start - renderStart, end: interval.end - renderStart }));
     const filters = [
-      'atrim=start=' + formatNumber(segment.cueIn || 0) + ':duration=' + formatNumber(renderDuration),
+      'atrim=start=' + Number(segment.cueIn || 0).toFixed(9) + ':duration=' + ((sampleCount + 1) / 48000).toFixed(9),
       'asetpts=PTS-STARTPTS',
       'aresample=48000',
       'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
     ];
-    const fadeIn = index === 0 ? clamp(Number(options.fadeIn) || 0, 0, renderDuration) : Math.min(crossfade, renderDuration);
-    const fadeOut = index === segments.length - 1 ? clamp(Number(options.fadeOut) || 0, 0, renderDuration) : Math.min(crossfade, renderDuration);
     if (!segment.explicitSilence) filters.push('loudnorm=I=' + (hasDialogue ? -28 : -18) + ':TP=-1.5:LRA=11:print_format=none');
     filters.push('aresample=48000');
     filters.push('aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo');
+    // Loudness/resampling may extend short inputs; the cap includes that tail.
+    filters.push('atrim=end_sample=' + sampleCount);
     filters.push('asetnsamples=n=480:p=0');
     filters.push('asetpts=N/SR/TB');
     if (options.autoDuck && localIntervals.length && options.duckDb < 0) {
@@ -846,7 +854,7 @@ function buildMultiTrackFilter(segments, duration, options, intervals, hasDialog
     }
     if (fadeIn > 0) filters.push('afade=t=in:st=0:d=' + formatNumber(fadeIn));
     if (fadeOut > 0) filters.push('afade=t=out:st=' + formatNumber(Math.max(0, renderDuration - fadeOut)) + ':d=' + formatNumber(fadeOut));
-    if (renderStart > 0) filters.push('adelay=' + Math.round(renderStart * 1000) + ':all=1');
+    if (startSample > 0) filters.push('adelay=' + (startSample % 48 === 0 ? startSample / 48 : startSample + 'S') + ':all=1');
     graph.push('[' + segment.inputIndex + ':a]' + filters.join(',') + '[seg' + index + ']');
   });
   const silenceRanges = segments.filter((segment) => segment.explicitSilence);
@@ -895,9 +903,9 @@ function csvEscape(value) {
 }
 
 function timelineCsv({ episode, segments, options, intervals, freezeTailSeconds, trackCount }) {
-  const spans = playbackSpans(segments);
-  const crossfade = spans.length > 1 && options.transitionFadeEnabled !== false ? Math.min(transitionFadeSeconds(options), ...spans.map((segment) => (segment.end - segment.start) / 2)) : 0;
-  const headers = ['episode', 'segment', 'start_sec', 'end_sec', 'bgm_file', 'mood', 'selection_reason', 'fade_in_sec', 'fade_out_sec', 'duck_db', 'duck_segments', 'freeze_tail', 'freeze_tail_sec', 'analysis_version', 'instrumental_status', 'cue_in_sec', 'intensity', 'needs_review', 'timing_source', 'transition_evidence', 'duck_attack_sec', 'duck_release_sec', 'music_loudness_lufs', 'vocal_evidence', 'scene_priority', 'minimum_tracks', 'actual_tracks', 'minimum_met'];
+  const spans = playbackWindows(segments, segments.at(-1).end, options);
+  const spanAt = (index) => spans.findLast((span) => span.inputIndex <= index);
+  const headers = ['episode', 'segment', 'start_sec', 'end_sec', 'bgm_file', 'mood', 'selection_reason', 'fade_in_sec', 'fade_out_sec', 'duck_db', 'duck_segments', 'freeze_tail', 'freeze_tail_sec', 'analysis_version', 'instrumental_status', 'cue_in_sec', 'intensity', 'needs_review', 'timing_source', 'transition_evidence', 'duck_attack_sec', 'duck_release_sec', 'music_loudness_lufs', 'vocal_evidence', 'scene_priority', 'minimum_tracks', 'actual_tracks', 'minimum_met', 'max_track_duration_sec', 'render_start_sec', 'render_end_sec'];
   const rows = segments.map((segment, index) => [
     episode,
     index + 1,
@@ -906,8 +914,8 @@ function timelineCsv({ episode, segments, options, intervals, freezeTailSeconds,
     segment.track ? path.relative(options.music, segment.track) : '',
     segment.mood,
     segment.reason,
-    formatNumber(index === 0 ? clamp(Number(options.fadeIn) || 0, 0, spans[0].end - spans[0].start) : segment.continueTrack ? 0 : crossfade),
-    formatNumber(index === segments.length - 1 ? clamp(Number(options.fadeOut) || 0, 0, spans.at(-1).end - spans.at(-1).start) : segments[index + 1]?.continueTrack ? 0 : crossfade),
+    formatNumber(spanAt(index).inputIndex === index ? spanAt(index).fadeIn : 0),
+    formatNumber(index === segments.length - 1 || spanAt(index + 1) !== spanAt(index) ? spanAt(index).fadeOut : 0),
     formatNumber(options.autoDuck && segment.track && options.duckDb < 0 && clipIntervals(intervals, segment.start, segment.end).length ? options.duckDb : 0),
     JSON.stringify(options.autoDuck && segment.track && options.duckDb < 0 ? clipIntervals(intervals, segment.start, segment.end).map((interval) => ({
       start: Number(formatNumber(interval.start)),
@@ -930,6 +938,9 @@ function timelineCsv({ episode, segments, options, intervals, freezeTailSeconds,
     trackCount.minimum,
     trackCount.actual,
     trackCount.met,
+    maxTrackDuration(options),
+    formatNumber(spanAt(index).renderStart),
+    formatNumber(spanAt(index).renderEnd),
   ]);
   return [headers, ...rows].map((row) => row.map(csvEscape).join(',')).join('\n') + '\n';
 }
@@ -1136,6 +1147,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       autoDuck: options.autoDuck,
       freezeTail: options.freezeTail || '0:00',
       maxTracksPerEpisode: options.maxTracksPerEpisode > 0 ? options.maxTracksPerEpisode : undefined,
+      maxTrackDuration: maxTrackDuration(options),
       fadeIn: options.fadeIn,
       fadeOut: options.fadeOut,
       transitionFadeEnabled: options.transitionFadeEnabled !== false,
@@ -1250,6 +1262,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       ...(musicPlan.story ? { story: musicPlan.story } : {}),
       wordTimestamps: Boolean(activeTranscript?.segments.some((segment) => segment.words?.length)), sceneCandidates: musicPlan.sceneCandidates, sceneError,
       segments: musicPlan.segments, timings, scenePriority: options.scenePriority !== false, trackCount: musicPlan.trackCount,
+      maxTrackDuration: maxTrackDuration(options),
       needsReview: Boolean(sceneError || !musicPlan.trackCount.met || musicPlan.segments.some((segment) => segment.review)),
       ducking: { enabled: Boolean(duckIntervals.length), db: duckIntervals.length ? options.duckDb : 0, attackSeconds: duckIntervals.length ? 0.12 : 0, releaseSeconds: duckIntervals.length ? 0.12 : 0, intervals: duckIntervals },
       originalAudioPreserved: probe.hasAudio, originalMusicChecked: false,
@@ -1310,6 +1323,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
   }
 }
 async function runBatch(options, logger = console) {
+  maxTrackDuration(options);
   if (options.storyEnabled !== undefined && typeof options.storyEnabled !== 'boolean') throw new Error('剧情辅助必须使用开关值');
   if (options.storyEnabled) {
     if (typeof options.createStoryPlan !== 'function') throw new Error('剧情辅助模型未配置，请在设置中配置模型服务后重试。');
