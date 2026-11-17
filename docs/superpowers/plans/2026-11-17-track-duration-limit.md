@@ -50,7 +50,7 @@
 - [x] Pass CLI default/validation/help, signature and generation evidence through `src/mvp.js`.
 - [x] Add real FFmpeg tone separation test: output is nonzero, different tone after deadline, no outgoing contribution after the audible limit.
 - [x] Run `node --test test/track-duration.test.js test/mvp.test.js test/story-music-plan.test.js`.
-- [ ] Review scoped changes, fix verified findings, commit planning/rendering tests and implementation.
+- [x] Review scoped changes, fix verified findings, commit planning/rendering tests and implementation.
 
 ## Task 2: Desktop Configuration And Persistence
 
@@ -72,7 +72,7 @@
 - [x] Preserve input zero through save/reload; communicate unlimited state and existing completed-output regeneration behavior.
 - [x] Extend actual Electron workbench check: edit, save/reload, disabled/unlimited, batch payload and responsive screenshots.
 - [x] Run desktop tests and real Electron workbench check, inspect desktop/minimum screenshots.
-- [ ] Independent spec/quality review, fix verified findings and commit.
+- [x] Independent spec/quality review, fix verified findings and commit.
 
 ## Task 3: Integration And Release
 
@@ -84,11 +84,11 @@
 - [x] Update version metadata and release notes; preserve all runtime/model assets.
 - [x] Build with `electron-builder --win --publish never`.
 - [x] Run packaged parity/workflow verification, encrypted settings checks, updater notice and local update-artifact checks.
-- [ ] Commit verified source, tag and push source/tag atomically without force.
-- [ ] Create draft release, upload installer/blockmap/latest.yml and verify every asset digest/size.
-- [ ] Publish only after all upload checks pass.
-- [ ] Verify public update metadata and updater discovery from the previous stable version.
-- [ ] Record verification evidence here, commit/push documentation and report download/settings/regeneration steps.
+- [x] Commit verified source, tag and push source/tag atomically without force.
+- [x] Create draft release, upload installer/blockmap/latest.yml and verify every asset digest/size.
+- [x] Publish only after all upload checks pass.
+- [x] Verify public update metadata and updater discovery from the previous stable version.
+- [x] Record verification evidence here, commit/push documentation and report download/settings/regeneration steps.
 
 ## Progress
 
@@ -109,4 +109,9 @@
 - Packaged encrypted API settings functional checks exit 0 using `--packaged --no-screenshots`, covering real IPC, save/reload, masked key, replacement, deletion, layout DOM assertions and no paid calls. The screenshot-enabled run reported Electron `UnknownVizError`; screenshots were explicitly skipped rather than reported as captured. Six duration-setting workbench screenshots remain verified. The optional flag affects only the test harness, not application behavior.
 - Local update-artifact validation exits 0, streaming all blockmap chunk checksums and validating latest.yml size/SHA512.
 - Installer: `auto-bgm-setup-1.0.7.exe`, 689220081 bytes; SHA256 `53b9f271ba4bb95914a4d3c506fbc2fa0a43abeea0ed895af18e3009953aee98`.
-- Source commit/tag, remote upload and public updater discovery remain pending.
+- Verified source commit `1cd443d` and annotated tag `v1.0.7` pushed atomically to the user's repository with no force.
+- Release `448638484` published as stable `v1.0.7` at `2026-11-17T13:09:54Z`, only after all three uploaded assets matched local SHA256 and byte counts.
+- `verify-update-artifacts.cjs --remote` exits 0: all installer blockmap chunks and latest.yml SHA512/size verified again; public release asset digests/sizes all match.
+- `check-published-update.cjs --expected=1.0.7 --from=1.0.6` exits 0: real packaged public GitHub updater discovers v1.0.7, with the correct 689220081-byte installer, without downloading or installing.
+- Final committed-tree `npm test` repeat: 228 passed, zero failures, 76882 ms (`build/v1.0.7-final-tests.log`).
+- No installation was performed on this computer or the user's other computer. Use the published update there, then explicitly regenerate normal completed media to apply the new duration setting.
