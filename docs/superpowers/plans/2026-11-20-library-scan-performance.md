@@ -53,4 +53,8 @@
 - [x] Bump the application version to `1.0.8` and document the scan-cache performance changes without claiming a measured wall-clock speedup.
 - [x] Run `npm test` and the desktop UI regression suite.
 - [x] Build the Windows installer and verify the generated updater metadata and artifact hashes.
-- [ ] Commit, push the source branch, then publish the verified v1.0.8 GitHub release so installed copies can discover the update.
+- [x] Commit and push the source branch, then publish the verified v1.0.8 GitHub release so installed copies can discover the update.
+- [x] Verify the published installer, blockmap, and `latest.yml` sizes and SHA-256 digests with `node tools/verify-update-artifacts.cjs --remote`.
+- [x] Verify the packaged updater discovers v1.0.8 from v1.0.7 with `npm exec -- electron tools/check-published-update.cjs --expected=1.0.8 --from=1.0.7`.
+
+Release: https://github.com/yuyuyu-a/auto-bgm/releases/tag/v1.0.8
