@@ -34,11 +34,17 @@ app.whenReady().then(async () => {
     'desktop/renderer/index.html', 'desktop/renderer/renderer.js', 'desktop/renderer/styles.css',
     'desktop/backend/batch-service.js', 'src/mvp.js', 'src/story-director.js',
     'src/music-dedup.js', 'src/music-library.js', 'src/music-selection.js', 'src/story-music-plan.js', 'src/track-duration.js',
+    'src/local-vision-assets.js', 'src/local-vision-plan.js', 'src/local-vision-runtime.js',
+    'src/subtitles.js', 'src/video-frames.js',
   ]) {
     // Git may normalize working-tree newlines after switching branches.
     assert.equal((await fs.readFile(path.join(source, file), 'utf8')).replace(/\r\n/g, '\n'),
       (await fs.readFile(path.join(repository, file), 'utf8')).replace(/\r\n/g, '\n'), `Packaged source mismatch: ${file}`);
   }
+  assert.equal(await fs.access(path.join(resources, 'local-vision')).then(() => true, () => false), false,
+    'User-downloaded local vision assets must not be bundled in the installer');
+  assert.equal(await fs.access(path.join(resources, 'model/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf')).then(() => true, () => false), false,
+    'Local vision model weights must remain outside the installer');
   const fixture = await fs.mkdtemp(path.join(repository, 'build/independent-package-'));
   const video = path.join(fixture, 'episode.mp4');
   const music = path.join(fixture, 'music');

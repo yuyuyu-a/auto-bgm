@@ -415,9 +415,10 @@ body { font-size: 14px; }
 .story-ai-key-entry .button { flex-shrink: 0; }
 .story-controls { min-width: 0; }
 .story-path-row { grid-template-columns: 82px minmax(0, 1fr) 42px auto; }
+.local-subtitle-row { grid-template-columns: 82px minmax(0, 1fr) 42px auto; }
 .story-evidence { overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
 .story-evidence p { margin: 10px 0; }
 .offline-badge.network { color: var(--cyan); border-color: var(--cyan); }
 .offline-badge.network .pulse-dot { background: var(--cyan); box-shadow: none; }
 @media (max-width: 1000px) { .story-ai-fields { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 760px) { .story-path-row { grid-template-columns: 70px minmax(0, 1fr) 42px auto; } }
+@media (max-width: 760px) { .story-path-row, .local-subtitle-row { grid-template-columns: 70px minmax(0, 1fr) 42px auto; } }

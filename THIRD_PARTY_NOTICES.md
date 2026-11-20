@@ -4,6 +4,8 @@
 
 ## 模型
 
+- `ggml-org/Qwen2.5-VL-3B-Instruct-GGUF`，固定 revision `5037fcf163dd95d1e41d1974465f0898ed108ca2`：Apache-2.0。按需下载 `Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf` 与 `mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf`，分别按清单校验 SHA-256；模型文件不包含在安装包内。模型卡与许可见上游仓库。
+
 - YAMNet float32/1：Google MediaPipe 官方 TFLite 模型，Apache-2.0，4,126,810 字节；SHA-256 `4d8b4a53282dc83ef04e3e7dbc4fbc98082e34e44ed798e16c3a0cdd4c584faf`。来源与校验信息随 `runtime/audio/SOURCE.txt` 分发。
 - `@mediapipe/tasks-audio` 1.2.2：Apache-2.0，使用随 npm 包分发的 JavaScript/WASM CPU 运行组件。音频在本机解码和推理；独立 Electron 会话限制所有网络请求仅访问随机令牌保护的本地资源服务，阻止外部请求与遥测。Apache-2.0 许可文本随应用的 `licenses/` 分发。
 
@@ -13,15 +15,21 @@
 
 ## Windows 应用运行时
 
+- `ggml-org/llama.cpp` Windows CPU x64 与 Vulkan x64 发布构建 `b12566`：MIT，版权归 The ggml authors。运行时压缩包按需下载并校验 SHA-256，用户明确启动本地视觉模式后才下载；未打入安装包。许可文本见 `licenses/llama.cpp-MIT.txt`。
+
 - Mammoth 1.13.0：BSD-2-Clause，用于本机提取 Word DOCX 剧本纯文本，不执行文档中的指令，不启用外部文件访问。版权和许可文本见 `licenses/Mammoth-BSD-2-Clause.txt`。其 npm 运行依赖的原始许可随 `app.asar/node_modules/` 保留；其中 SAX 的 Blue Oak Model License 1.0.0 文本亦见 `licenses/SAX-BlueOak-1.0.0.txt`。JSZip 采用其 MIT 许可选项。
 - electron-updater 6.8.12：MIT；许可证文本保存在 `licenses/electron-updater-MIT.txt`。
 - Electron 45.2.2：Electron 的 MIT 许可证；发行包还包含 Electron/Chromium 等上游组件随发行包提供的许可证与 notices。
 - FFmpeg `n9.0.2-45-g1e65c6cd5d-20261103`：使用 BtbN 的 win64 shared 构建。该构建启用 shared 与 version3，未启用 `--enable-gpl`；随安装包提供上游 `LICENSE.txt`。构建来源、归档名和 SHA-256 写在 `runtime/ffmpeg/SOURCE.txt`。
 - 转录侧车还包含 PyAV 18.1.0（BSD 3-Clause）、huggingface-hub 2.4.0（Apache-2.0）、tokenizers 0.23.3（Apache-2.0）、ONNX Runtime 1.31.1（MIT）和 Silero VAD 模型（MIT）。本仓库 `licenses/` 目录保留这些组件对应的许可证文本。PyInstaller 6.16.0 使用 GPLv2-or-later with a special exception，允许用其构建并分发非自由程序；例外文本也保存在 `licenses/PyInstaller-LICENSE.txt`。
 
-许可证文本保存在 `licenses/`：faster-whisper、CTranslate2、Electron、electron-updater、ONNX Runtime 和 Silero VAD 的 MIT 文本，Apache-2.0、FFmpeg LGPL、PyAV 与 PyInstaller 许可证。安装包也会附带本说明和这些文本。
+许可证文本保存在 `licenses/`：faster-whisper、CTranslate2、Electron、electron-updater、llama.cpp、ONNX Runtime 和 Silero VAD 的 MIT 文本，Apache-2.0、FFmpeg LGPL、PyAV 与 PyInstaller 许可证。安装包也会附带本说明和这些文本。
 
 ## 上游来源
+
+- Qwen2.5-VL GGUF 固定 revision：<https://huggingface.co/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/tree/5037fcf163dd95d1e41d1974465f0898ed108ca2>
+- llama.cpp Windows 运行时发布：<https://github.com/ggml-org/llama.cpp/releases/tag/b12566>
+- llama.cpp 多模态说明：<https://github.com/ggml-org/llama.cpp/blob/master/tools/mtmd/README.md>
 
 - faster-whisper 模型卡：<https://huggingface.co/Systran/faster-whisper-small/tree/536b0662742c02347bc0e980a01041f333bce120>
 - 原始 Whisper small 模型卡（revision `973afd24965f72e36ca33b3055d56a652f456b4d`）：<https://huggingface.co/openai/whisper-small/tree/973afd24965f72e36ca33b3055d56a652f456b4d>

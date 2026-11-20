@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const { createAudioClassifier } = require('./audio-classifier');
 const { createStoryAISettings } = require('./story-ai-settings');
 const { listModels, requestStoryPlan } = require('../src/story-director');
+const { LOCAL_VISION_MODEL, assetDownloadEstimate, cancelLocalVisionDownload, downloadLocalVisionAssets, inspectLocalVisionAssets } = require('../src/local-vision-assets');
+const { createLocalVisionPlanner } = require('../src/local-vision-runtime');
 const runtime = app.isPackaged ? {
   transcriberExecutable: path.join(process.resourcesPath, 'transcriber', 'bgm-transcriber.exe'),
   modelPath: path.join(process.resourcesPath, 'model', 'small'),
@@ -25,6 +27,14 @@ const { schedulePendingUpdateCleanup } = require('./update-cache');
 let mainWindow;
 let updateService;
 let batchStarting = false;
+let localVisionRoot = '';
+let localVisionPlanner;
+let localVisionDownloadActive = false;
+
+async function getLocalVisionStatus() {
+  const status = await inspectLocalVisionAssets(localVisionRoot);
+  return { ...status, backend: 'auto', estimatedBytes: assetDownloadEstimate() };
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -59,7 +69,19 @@ function sendUpdate(event) {
   mainWindow.webContents.send('update:event', event);
 }
 
+function sendLocalVision(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('local-vision:event', event);
+}
+
 app.whenReady().then(() => {
+  localVisionRoot = path.join(app.getPath('userData'), 'local-vision');
+  localVisionPlanner = createLocalVisionPlanner({
+    root: localVisionRoot,
+    onProgress: (event) => sendLocalVision({ type: 'progress', ...event }),
+  });
+  runtime.localVisionModelRevision = LOCAL_VISION_MODEL.revision;
+  runtime.createLocalVisionPlan = (context) => localVisionPlanner.plan(context);
   const storyAI = createStoryAISettings({ filePath: path.join(app.getPath('appData'), require('../package.json').name, 'story-ai.json'), safeStorage });
   runtime.createStoryPlan = async (context) => requestStoryPlan(context, await storyAI.readPrivate(), { signal: context.signal });
   const refreshStoryProfile = async () => {
@@ -102,8 +124,38 @@ app.whenReady().then(() => {
     ...await getInfo(runtime),
     version: app.getVersion(),
     storyAI: await storyAI.readPublic(),
+    localVision: await getLocalVisionStatus(),
     update: updateService?.getState() || { status: 'idle', enabled: false, currentVersion: app.getVersion(), version: '', releaseDate: '', releaseNotes: '', sizeBytes: 0, percent: 0, transferred: 0, total: 0, speed: 0, lastCheckedAt: '', errorMessage: '' },
   }));
+  ipcMain.handle('local-vision:download', async () => {
+    if (localVisionDownloadActive) throw new Error('本地模型下载已在进行。');
+    if (batchStarting || getInfo(runtime).running) throw new Error('请等待当前批次结束后再下载本地模型。');
+    localVisionDownloadActive = true;
+    try {
+      await downloadLocalVisionAssets(localVisionRoot, {
+        onProgress: (event) => sendLocalVision({
+          type: 'progress',
+          stage: event.stage,
+          asset: event.asset,
+          variant: event.variant,
+          transferred: event.transferred,
+          total: event.total,
+          percent: event.percent,
+        }),
+      });
+      const status = await getLocalVisionStatus();
+      sendLocalVision({ type: 'ready', status });
+      return status;
+    } catch (error) {
+      if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
+        throw new Error('本地模型下载已取消。');
+      }
+      throw new Error(error.message || '本地模型下载或校验失败，请重试。');
+    } finally {
+      localVisionDownloadActive = false;
+    }
+  });
+  ipcMain.handle('local-vision:cancel-download', () => cancelLocalVisionDownload());
   ipcMain.handle('update:state', () => updateService?.getState());
   ipcMain.handle('update:check', () => updateService?.check({ manual: true }));
   ipcMain.handle('update:download', () => updateService?.download());
@@ -138,8 +190,17 @@ app.whenReady().then(() => {
     });
     return result.canceled ? null : result.filePaths[0];
   });
+  ipcMain.handle('dialog:subtitle-file', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择与视频同名的 SRT 字幕',
+      properties: ['openFile'],
+      filters: [{ name: 'SRT 字幕', extensions: ['srt'] }],
+    });
+    return result.canceled ? null : result.filePaths[0];
+  });
   ipcMain.handle('batch:inspect', async (_event, config) => {
     await refreshStoryProfile();
+    runtime.localVisionStatus = await getLocalVisionStatus();
     return inspectBatch({ ...config, ...runtime });
   });
   ipcMain.handle('music:check', (_event, config) => checkMusicLibrary({ ...config, ...runtime }, (library) => send({ type: 'library-progress', library })));
@@ -155,6 +216,7 @@ app.whenReady().then(() => {
     batchStarting = true;
     try {
       await refreshStoryProfile();
+      runtime.localVisionStatus = await getLocalVisionStatus();
       return await startBatch(config, send, runtime);
     }
     finally { batchStarting = false; }
@@ -181,7 +243,11 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', () => updateService?.dispose());
+app.on('before-quit', () => {
+  cancelLocalVisionDownload();
+  localVisionPlanner?.dispose();
+  updateService?.dispose();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

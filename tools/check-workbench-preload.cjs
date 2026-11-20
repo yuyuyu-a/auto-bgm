@@ -7,16 +7,21 @@ const root = process.argv.find((arg) => arg.startsWith('--bgm-test-root=')).slic
 const fixture = JSON.parse(fs.readFileSync(path.join(root, 'fixture.json'), 'utf8'));
 let batchListener;
 let updateListener;
+let localVisionListener;
 let finishLibrary;
+let finishLocalVisionDownload;
 const calls = [];
+const localVisionUnavailable = { ready: false, modelBytes: 0, backend: 'unavailable', runtime: { cpu: false, vulkan: false } };
+const localVisionReady = { ready: true, modelBytes: 2774658784, backend: 'cpu', runtime: { cpu: true, vulkan: true } };
 
 contextBridge.exposeInMainWorld('bgmStudio', {
-  appInfo: async () => fixture.info,
+  appInfo: async () => ({ ...fixture.info, localVision: fixture.info.localVision || localVisionUnavailable, localVisionEstimateBytes: 2838255056 }),
   inspectBatch: async (config) => ({ ...fixture.batch, rows: config.videos ? fixture.batch.rows : [], inputVideoCount: config.videos ? 60 : 0 }),
   episodeDetail: async () => fixture.detail,
   startBatch: async (config) => { calls.push({ action: 'start', config }); return { started: true, run: fixture.info.run }; },
   stopBatch: async () => { calls.push({ action: 'stop' }); return { stopped: true }; },
   chooseDirectory: async () => null,
+  chooseSubtitleFile: async () => fixture.info.localSubtitlePath || '',
   chooseVideoFile: async () => null,
   getPathForFile: () => fixture.info.defaults.videos,
   resolveImport: async (input) => ({ key: input.key || 'videos', path: input.path }),
@@ -26,6 +31,15 @@ contextBridge.exposeInMainWorld('bgmStudio', {
     return fixture.library;
   },
   stopLibraryAnalysis: async () => { calls.push({ action: 'library-stop' }); finishLibrary?.(); return { stopped: true }; },
+  downloadLocalVisionAssets: async () => {
+    calls.push({ action: 'local-vision-download' });
+    return new Promise((resolve) => { finishLocalVisionDownload = resolve; });
+  },
+  cancelLocalVisionDownload: async () => {
+    calls.push({ action: 'local-vision-cancel' });
+    finishLocalVisionDownload?.(localVisionUnavailable);
+    return { cancelled: true };
+  },
   reviewMusicTrack: async (input) => {
     calls.push({ action: 'library-review', input });
     const file = fixture.library.files.find((entry) => entry.file === input.file);
@@ -42,6 +56,7 @@ contextBridge.exposeInMainWorld('bgmStudio', {
   toggleMaximize: async () => {},
   onBatchEvent: (listener) => { batchListener = listener; },
   onUpdateEvent: (listener) => { updateListener = listener; },
+  onLocalVisionEvent: (listener) => { localVisionListener = listener; },
 });
 contextBridge.exposeInMainWorld('workbenchTest', {
   emitBatch: (event) => {
@@ -52,5 +67,7 @@ contextBridge.exposeInMainWorld('workbenchTest', {
     batchListener(event);
   },
   emitUpdate: (update) => updateListener(update),
+  emitLocalVision: (event) => localVisionListener(event),
+  finishLocalVisionDownload: () => finishLocalVisionDownload?.(localVisionReady),
   calls: () => calls,
 });

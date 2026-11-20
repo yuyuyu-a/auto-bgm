@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('bgmStudio', {
   chooseDirectory: (title) => ipcRenderer.invoke('dialog:directory', title),
   chooseVideoFile: () => ipcRenderer.invoke('dialog:video-file'),
   chooseStoryFile: () => ipcRenderer.invoke('dialog:story-file'),
+  chooseSubtitleFile: () => ipcRenderer.invoke('dialog:subtitle-file'),
+  downloadLocalVisionAssets: () => ipcRenderer.invoke('local-vision:download'),
+  cancelLocalVisionDownload: () => ipcRenderer.invoke('local-vision:cancel-download'),
   storyAISettings: () => ipcRenderer.invoke('story-ai:settings'),
   saveStoryAISettings: (input) => ipcRenderer.invoke('story-ai:save', input),
   storyAIModels: () => ipcRenderer.invoke('story-ai:models'),
@@ -40,5 +43,10 @@ contextBridge.exposeInMainWorld('bgmStudio', {
     const wrapped = (_event, payload) => listener(payload);
     ipcRenderer.on('update:event', wrapped);
     return () => ipcRenderer.removeListener('update:event', wrapped);
+  },
+  onLocalVisionEvent: (listener) => {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on('local-vision:event', wrapped);
+    return () => ipcRenderer.removeListener('local-vision:event', wrapped);
   },
 });

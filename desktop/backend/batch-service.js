@@ -36,6 +36,8 @@ const DEFAULTS = {
   outputTranscript: true,
   storyEnabled: false,
   storyPath: '',
+  localVisionEnabled: false,
+  localSubtitlePath: '',
   ffmpeg: process.env.FFMPEG || 'ffmpeg',
   ffprobe: process.env.FFPROBE || 'ffprobe',
 };
@@ -74,7 +76,8 @@ async function inspectPath(value, kind) {
     }
   }
 
-  const extensions = kind === 'videos' ? VIDEO_EXTENSIONS : kind === 'storyPath' ? STORY_EXTENSIONS : null;
+  const extensions = kind === 'videos' ? VIDEO_EXTENSIONS : kind === 'storyPath' ? STORY_EXTENSIONS
+    : kind === 'localSubtitlePath' ? new Set(['.srt']) : null;
   if (extensions ? !(stat.isDirectory() || (stat.isFile() && extensions.has(path.extname(target).toLowerCase()))) : !stat.isDirectory()) {
     return { status: 'unavailable', label: '\u4e0d\u53ef\u8bbf\u95ee' };
   }
@@ -113,6 +116,8 @@ async function assertRunConfig(input, runtime = {}) {
     transcripts: cleanPath(input?.transcripts) || null, modelPath: cleanPath(runtime.modelPath) || cleanPath(input?.modelPath) || DEFAULTS.modelPath,
     storyEnabled: input?.storyEnabled === undefined ? DEFAULTS.storyEnabled : input.storyEnabled,
     storyPath: cleanPath(input?.storyPath),
+    localVisionEnabled: input?.localVisionEnabled === undefined ? DEFAULTS.localVisionEnabled : input.localVisionEnabled,
+    localSubtitlePath: cleanPath(input?.localSubtitlePath),
     language: cleanPath(input?.language) || 'auto', transcribe: input?.storyEnabled === true || Boolean(input?.transcribe), mood: cleanPath(input?.mood) || null, autoDuck: input?.autoDuck === undefined ? DEFAULTS.autoDuck : input.autoDuck,
     strictInstrumental: input?.strictInstrumental === undefined ? DEFAULTS.strictInstrumental : input.strictInstrumental,
     scenePriority: input?.scenePriority === undefined ? DEFAULTS.scenePriority : input.scenePriority,
@@ -130,9 +135,20 @@ async function assertRunConfig(input, runtime = {}) {
   };
   for (const key of ['videos', 'music', 'output']) if (!config[key]) throw new Error(`请先选择${key === 'videos' ? '视频目录' : key === 'music' ? 'BGM 目录' : '输出目录'}`);
   if (typeof config.storyEnabled !== 'boolean') throw new Error('剧情辅助必须使用开关值');
+  if (typeof config.localVisionEnabled !== 'boolean') throw new Error('本地画面配乐必须使用开关值');
+  if (config.storyEnabled && config.localVisionEnabled) throw new Error('剧情 API 与本地画面配乐只能选择一种模式。');
   if (config.storyEnabled) {
     if (typeof (runtime.createStoryPlan || input?.createStoryPlan) !== 'function') throw new Error('剧情辅助模型未配置，请在设置中配置模型服务后重试。');
     if (!config.storyPath || (await inspectPath(config.storyPath, 'storyPath')).status !== 'available') throw new Error('剧情辅助的剧本或分镜路径不可访问，请选择有效文件或目录。');
+  }
+  if (config.localVisionEnabled) {
+    if (typeof (runtime.createLocalVisionPlan || input?.createLocalVisionPlan) !== 'function') throw new Error('本地画面配乐模型未配置，请先在设置中下载并校验模型。');
+    const status = runtime.localVisionStatus || input?.localVisionStatus;
+    if (status?.ready !== true) throw new Error('本地画面配乐模型尚未下载并校验，请在设置中完成下载。');
+    if (!config.localSubtitlePath || (await inspectPath(config.localSubtitlePath, 'localSubtitlePath')).status !== 'available') {
+      throw new Error('SRT 字幕路径不可访问，请选择 SRT 字幕文件或目录。');
+    }
+    config.transcribe = false;
   }
   if (!['all', 'unfinished', 'failed', 'episode'].includes(config.runMode)) throw new Error('不支持的批次恢复方式');
   if (config.runMode === 'episode' && !config.episodeVideoPath) throw new Error('请先选择需要重新生成的视频');
@@ -149,7 +165,8 @@ async function assertRunConfig(input, runtime = {}) {
   for (const key of ['outputAudio', 'outputVideo', 'outputTimeline', 'outputTranscript']) {
     if (input?.[key] !== undefined && typeof input[key] !== 'boolean') throw new Error('输出内容设置必须使用开关值');
   }
-  if (![config.outputAudio, config.outputVideo, config.outputTimeline].some(Boolean) && !(config.outputTranscript && config.transcribe)) throw new Error('请至少选择一种输出内容；单独输出转录文本时需开启本地转录');
+  if (![config.outputAudio, config.outputVideo, config.outputTimeline].some(Boolean) &&
+      !(config.outputTranscript && (config.transcribe || config.localVisionEnabled))) throw new Error('请至少选择一种输出内容；单独输出转录文本时需开启本地转录或本地画面配乐');
   if (!/^\d+:\d+$/.test(config.freezeTail)) throw new Error('片尾定格时长格式应为 秒:帧，例如 2:15');
   if (config.transcribe && !(await exists(config.modelPath))) throw new Error(`模型目录不存在：${config.modelPath}`);
   return config;
@@ -181,12 +198,14 @@ function stateEpisodes(state) { return state?.episodes && typeof state.episodes 
 async function inspectBatch(input = {}) {
   const config = { ...DEFAULTS, ...input, maxTrackDuration: trackDurationSeconds(input.maxTrackDuration) };
   if (config.storyEnabled === true) config.transcribe = true;
+  if (config.localVisionEnabled === true) config.transcribe = false;
   const output = cleanPath(config.output);
   const paths = {
     videos: await inspectPath(config.videos, 'videos'),
     music: await inspectPath(config.music, 'music'),
     output: await inspectPath(output, 'output'),
     storyPath: await inspectPath(config.storyPath, 'storyPath'),
+    localSubtitlePath: await inspectPath(config.localSubtitlePath, 'localSubtitlePath'),
   };
   const state = output ? await readJson(path.join(output, '.mvp-state.json'), { episodes: {} }) : { episodes: {} };
   const summary = output ? await readJson(path.join(output, 'run-summary.json'), null) : null;
@@ -227,13 +246,19 @@ async function inspectBatch(input = {}) {
   const model = await modelInfo(cleanPath(config.modelPath) || DEFAULTS.modelPath);
   const tools = await inspectTools(config);
   let validationError = '';
-  try { await assertRunConfig(config); } catch (error) { validationError = error.message; }
+  try { await assertRunConfig(config, input); } catch (error) { validationError = error.message; }
   const publicKeys = [...Object.keys(DEFAULTS), 'transcripts', 'transcribe', 'mood', 'duckDb', 'fadeIn', 'fadeOut', 'overwrite', 'runMode', 'episodeVideoPath'];
   const publicConfig = Object.fromEntries(publicKeys.filter((key) => config[key] !== undefined).map((key) => [key, config[key]]));
   const story = { enabled: config.storyEnabled === true,
     ready: typeof config.createStoryPlan === 'function' && paths.storyPath.status === 'available',
     profile: publicStoryProfile(config.storyAIProfile) };
-  return { config: { ...publicConfig, output }, story, state, summary, rows, warning, validationError, active: Boolean(activeRun), run: runSnapshot(), model, musicGroups, musicCount, paths, tools, inputVideoCount: videos.length, inputVideos: videos, reportPath: output && await exists(path.join(output, 'run-report.md')) ? path.join(output, 'run-report.md') : '', errorLogPath: output && await exists(path.join(output, 'run-errors.log')) ? path.join(output, 'run-errors.log') : '' };
+  const localVisionStatus = input.localVisionStatus && typeof input.localVisionStatus === 'object'
+    ? { ready: input.localVisionStatus.ready === true, modelBytes: Number(input.localVisionStatus.modelBytes) || 0,
+      backend: ['vulkan', 'cpu', 'auto'].includes(input.localVisionStatus.backend) ? input.localVisionStatus.backend : 'unavailable' }
+    : { ready: false, modelBytes: 0, backend: 'unavailable' };
+  return { config: { ...publicConfig, output }, story,
+    localVision: { enabled: config.localVisionEnabled === true, ...localVisionStatus },
+    state, summary, rows, warning, validationError, active: Boolean(activeRun), run: runSnapshot(), model, musicGroups, musicCount, paths, tools, inputVideoCount: videos.length, inputVideos: videos, reportPath: output && await exists(path.join(output, 'run-report.md')) ? path.join(output, 'run-report.md') : '', errorLogPath: output && await exists(path.join(output, 'run-errors.log')) ? path.join(output, 'run-errors.log') : '' };
 }
 
 async function inspectTools(config) {
@@ -351,12 +376,13 @@ function stopLibraryAnalysis() { libraryRun?.abort(); return { stopped: Boolean(
 async function resolveImport(input = {}) {
   const target = cleanPath(input.path);
   const key = input.key || '';
-  if (!target || (key && !['videos', 'music', 'output', 'transcripts', 'modelPath', 'storyPath'].includes(key))) throw new Error('拖入路径或用途无效');
+  if (!target || (key && !['videos', 'music', 'output', 'transcripts', 'modelPath', 'storyPath', 'localSubtitlePath'].includes(key))) throw new Error('拖入路径或用途无效');
   const stat = await fs.stat(target);
   const extension = path.extname(target).toLowerCase();
   if (key) {
     if (!stat.isDirectory() && !(key === 'videos' && stat.isFile() && VIDEO_EXTENSIONS.has(extension)) && !(key === 'music' && stat.isFile() && AUDIO_EXTENSIONS.has(extension)) &&
-      !(key === 'storyPath' && stat.isFile() && STORY_EXTENSIONS.has(extension))) throw new Error('请拖入对应目录；视频栏也接受单个视频，音乐栏也接受音频文件。');
+      !(key === 'storyPath' && stat.isFile() && STORY_EXTENSIONS.has(extension)) &&
+      !(key === 'localSubtitlePath' && stat.isFile() && extension === '.srt')) throw new Error('请拖入对应目录；视频栏也接受单个视频，音乐栏也接受音频文件，字幕栏接受 SRT 文件。');
     return { key, path: key === 'music' && stat.isFile() ? path.dirname(target) : target };
   }
   if (stat.isFile() && VIDEO_EXTENSIONS.has(extension)) return { key: 'videos', path: target };
@@ -378,7 +404,7 @@ function errorCategory(message) {
 async function diagnostics(input = {}, runtime = {}, versions = {}) {
   const config = { ...DEFAULTS, ...input, ...runtime };
   const [tools, model] = await Promise.all([inspectTools(config), modelInfo(cleanPath(config.modelPath) || DEFAULTS.modelPath)]);
-  const settings = Object.fromEntries(['transcribe', 'autoDuck', 'scenePriority', 'overwrite', 'skipCompleted', 'outputAudio', 'outputVideo', 'outputTimeline', 'outputTranscript'].map((key) => [key, Boolean(config[key])]));
+  const settings = Object.fromEntries(['transcribe', 'autoDuck', 'scenePriority', 'overwrite', 'skipCompleted', 'outputAudio', 'outputVideo', 'outputTimeline', 'outputTranscript', 'storyEnabled', 'localVisionEnabled'].map((key) => [key, Boolean(config[key])]));
   for (const key of ['duckDb', 'fadeIn', 'fadeOut', 'transitionFadeDuration', 'minTracksPerEpisode', 'maxTracksPerEpisode']) settings[key] = Number.isFinite(Number(config[key])) ? Number(config[key]) : '未设置';
   const maxTrackDuration = trackDurationSeconds(config.maxTrackDuration);
   settings.maxTrackDuration = Number.isFinite(maxTrackDuration) ? maxTrackDuration : '未设置';
@@ -468,8 +494,16 @@ async function startBatch(input, emit, runtime = {}) {
     if (event.type === 'progress') {
       if (event.total !== undefined) lastRun.total = event.total;
       if (event.index !== undefined) {
-        if (lastRun.currentIndex !== event.index) episodeStartedAt = Date.now();
+        if (lastRun.currentIndex !== event.index) {
+          episodeStartedAt = Date.now();
+          lastRun.currentFrame = 0;
+          lastRun.currentFrames = 0;
+        }
         Object.assign(lastRun, { currentIndex: event.index, currentEpisode: event.episode, videoPath: event.videoPath });
+      }
+      if (Number.isSafeInteger(event.frame) && Number.isSafeInteger(event.frames)) {
+        lastRun.currentFrame = event.frame;
+        lastRun.currentFrames = event.frames;
       }
       lastRun.currentStage = event.stage || event.status || lastRun.currentStage;
       if (Object.hasOwn(lastRun.counts, event.status) && !settled.has(event.videoPath)) {

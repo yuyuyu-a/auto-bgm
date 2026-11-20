@@ -14,6 +14,10 @@ const state = {
   config: {},
   defaults: {},
   bundledRuntime: false,
+  localVision: { ready: false, modelBytes: 0, backend: 'unavailable', estimatedBytes: 0 },
+  localVisionProgress: null,
+  localVisionDownloadBusy: false,
+  localVisionError: '',
   data: { rows: [], summary: null, warning: null },
   detail: null,
   selectedEpisode: '',
@@ -58,7 +62,7 @@ const PRESETS = {
 };
 
 function rememberPaths() {
-  for (const key of ['videos', 'music', 'output', 'transcripts', 'modelPath']) {
+  for (const key of ['videos', 'music', 'output', 'transcripts', 'modelPath', 'localSubtitlePath']) {
     const value = String(state.config[key] || '').trim();
     if (value) state.recentPaths[key] = [value, ...(state.recentPaths[key] || []).filter((item) => item !== value)].slice(0, 5);
   }
@@ -74,7 +78,8 @@ function preflightChecks() {
   const musicCount = state.data.musicCount ?? (state.data.musicGroups || []).reduce((sum, group) => sum + group.count, 0);
   const usableCount = state.library?.usable ?? musicCount;
   const storySilenceReady = state.config.storyEnabled && musicCount > 0 && usableCount === 0;
-  const outputsReady = [state.config.outputAudio, state.config.outputVideo, state.config.outputTimeline].some(Boolean) || (state.config.outputTranscript && state.config.transcribe);
+  const outputsReady = [state.config.outputAudio, state.config.outputVideo, state.config.outputTimeline].some(Boolean) ||
+    (state.config.outputTranscript && (state.config.transcribe || state.config.localVisionEnabled));
   const checks = [
     { name: '视频', ok: paths.videos?.status === 'available' && state.data.inputVideoCount > 0, label: state.data.inputVideoCount ? `找到 ${state.data.inputVideoCount} 个视频` : paths.videos?.status === 'available' ? '目录中没有支持的视频' : paths.videos?.label || '未选择', action: 'choose-videos', fix: '选择视频目录' },
     { name: 'BGM', ok: paths.music?.status === 'available' && (usableCount > 0 || storySilenceReady), label: storySilenceReady ? '无合格曲目 · 仅可留白' : state.library ? `当前可选 ${usableCount} / ${musicCount} 首` : musicCount ? `${musicCount} 首 · ${state.config.strictInstrumental !== false ? '开始时核验纯音乐' : '允许未确认曲目'}` : '未选择或没有可用曲目', action: musicCount ? 'analyze-library' : 'choose-music', fix: musicCount ? '筛选或人工确认曲目' : '选择音乐目录' },
@@ -88,6 +93,12 @@ function preflightChecks() {
     checks.push(
       { name: '剧情文档', ok: Boolean(state.config.storyPath?.trim()) && (!storyPath || storyPath.status === 'available'), label: storyPath?.label || (state.config.storyPath ? '已选择' : '未选择'), action: 'choose-story-file', fix: '选择文档' },
       { name: '剧情 API', ok: Boolean(state.storyAI.baseUrl && state.storyAI.model && state.storyAI.keyStored), label: !state.storyAI.baseUrl ? '未设置地址' : !state.storyAI.model ? '未设置模型' : !state.storyAI.keyStored ? '未保存密钥' : '已配置', action: 'set-view', view: 'settings', fix: '设置 API' },
+    );
+  }
+  if (state.config.localVisionEnabled) {
+    checks.push(
+      { name: 'SRT 字幕', ok: paths.localSubtitlePath?.status === 'available', label: paths.localSubtitlePath?.label || '未选择', action: 'choose-subtitle-file', fix: '选择 SRT 字幕' },
+      { name: '本地画面模型', ok: state.localVision.ready, label: state.localVision.ready ? `已校验 · ${formatBytes(state.localVision.modelBytes)}` : '尚未下载，需联网下载约 2.8 GB', action: state.localVision.ready ? 'refresh-local-vision' : 'download-local-vision', fix: state.localVision.ready ? '重新检查' : '下载模型' },
     );
   }
   if (state.data.validationError && !checks.some((check) => !check.ok)) {
@@ -125,6 +136,26 @@ function queueDisplayStatus(row) {
   return row.needsRegeneration && ['completed', 'skipped'].includes(row.status) ? 'pending' : row.status;
 }
 
+function bgmPlanningMode() {
+  if (state.config.localVisionEnabled) return 'local';
+  if (state.config.storyEnabled) return 'story';
+  return 'rules';
+}
+
+function renderLocalVisionModelContents() {
+  const status = state.localVision;
+  const progress = state.localVisionProgress;
+  const stageLabels = { preparing: '准备下载…', downloading: `正在下载 ${progress?.asset === 'model' ? '模型' : '运行时'}`, extracting: '正在解压本地运行时…', verified: '正在校验文件…' };
+  const statusText = state.localVisionDownloadBusy
+    ? `${stageLabels[progress?.stage] || '正在启动下载…'}${Number.isFinite(progress?.percent) ? ` · ${Number(progress.percent).toFixed(0)}% · ${formatBytes(progress.transferred)} / ${formatBytes(progress.total)}` : ''}`
+    : status.ready ? `模型与本地运行时已校验 · ${formatBytes(status.modelBytes)}` : state.localVisionError || `尚未安装 · 首次下载约 ${formatBytes(status.estimatedBytes || 2838255056)}`;
+  return `<div class="local-vision-status" id="local-vision-state" role="status" aria-live="polite">${escapeHtml(statusText)}</div><p class="config-note">无需 API。视频抽帧和字幕只在本机分析；发现可用 GPU 时优先使用，否则由 CPU 处理，速度可能较慢。模型单独下载到用户目录，不包含在安装包内。</p><div class="story-ai-actions">${state.localVisionDownloadBusy
+    ? `<button class="button ghost" data-action="cancel-local-vision" ${state.running ? 'disabled' : ''}>取消下载</button>`
+    : status.ready
+      ? '<button class="button ghost" data-action="refresh-local-vision">检查本地模型</button>'
+      : `<button class="button" data-action="download-local-vision" ${state.running || state.starting ? 'disabled' : ''}>下载并校验模型</button>`}</div>`;
+}
+
 function renderMetrics() {
   const rows = state.data.rows || [];
   const counts = state.running ? state.run?.counts : undefined;
@@ -140,9 +171,11 @@ function renderProgress() {
   const run = state.run;
   if (!run) return '<strong>准备开始</strong><p>完成下方检查后，即可开始本地批次。</p>';
   const percent = run.total ? Math.min(100, Math.floor(run.settled / run.total * 100)) : 0;
-  const stages = { scanning: '扫描视频', 'checking-library': '检查音乐库', 'analyzing-vocals': '整库人声筛选', 'detecting-scenes': '检测镜头候选', scanned: '准备处理', probing: '读取视频信息', transcribing: '本地语音转录', 'analyzing-story': '分析剧情', planning: '选择配乐', 'rendering-audio': '生成背景音乐音频', 'rendering-video': '生成并核验最终视频', saving: '保存产物', checking: '核验已完成产物', processing: '处理中', completed: '本集完成', skipped: '本集已跳过', failed: '本集失败，继续下一集', interrupted: '本集已中断', stopping: '正在停止', stopped: '批次已停止', finished: '批次已结束', error: '批次需要处理' };
+  const stages = { scanning: '扫描视频', 'checking-library': '检查音乐库', 'analyzing-vocals': '整库人声筛选', 'detecting-scenes': '检测镜头候选', scanned: '准备处理', probing: '读取视频信息', transcribing: '本地语音转录', 'analyzing-story': '分析剧情', 'sampling-frames': '读取视频画面', 'starting-vision': '启动本地视觉分析', 'vision-ready': '本地视觉模型已就绪', 'analyzing-vision': '正在结合画面与字幕分析', 'vision-completed': '画面与字幕分析完成', planning: '选择配乐', 'rendering-audio': '生成背景音乐音频', 'rendering-video': '生成并核验最终视频', saving: '保存产物', checking: '核验已完成产物', processing: '处理中', completed: '本集完成', skipped: '本集已跳过', failed: '本集失败，继续下一集', interrupted: '本集已中断', stopping: '正在停止', stopped: '批次已停止', finished: '批次已结束', error: '批次需要处理' };
   const eta = run.estimatedRemainingMs === null || run.estimatedRemainingMs === undefined ? '正在估算' : `预计还需约 ${Math.max(1, Math.ceil(Math.max(0, run.estimatedRemainingMs - (Date.now() - run.estimatedAt)) / 60000))} 分钟`;
-  return `<div class="progress-heading"><strong>${state.running ? '正在处理' : stages[run.status] || '上次批次'} · 第 ${run.currentIndex || 0} / ${run.total || 0} 集</strong><span>${percent}% · 已处理 ${run.settled || 0} 集</span></div><div class="batch-progress" role="progressbar" aria-label="批次整体进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div><p>${run.currentEpisode ? `当前：${escapeHtml(run.currentEpisode)} · ` : ''}${escapeHtml(stages[run.currentStage] || run.currentStage || '准备中')} · ${state.running ? eta : `耗时约 ${Math.max(0, Math.round(((run.finishedAt || Date.now()) - run.startedAt) / 60000))} 分钟`}</p>${run.error ? `<p class="error-text">${escapeHtml(run.error)}</p>` : ''}`;
+  const frameProgress = run.currentStage === 'sampling-frames' && run.currentFrames
+    ? ` · ${run.currentFrame || 0} / ${run.currentFrames} 帧` : '';
+  return `<div class="progress-heading"><strong>${state.running ? '正在处理' : stages[run.status] || '上次批次'} · 第 ${run.currentIndex || 0} / ${run.total || 0} 集</strong><span>${percent}% · 已处理 ${run.settled || 0} 集</span></div><div class="batch-progress" role="progressbar" aria-label="批次整体进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div><p>${run.currentEpisode ? `当前：${escapeHtml(run.currentEpisode)} · ` : ''}${escapeHtml(stages[run.currentStage] || run.currentStage || '准备中')}${frameProgress} · ${state.running ? eta : `耗时约 ${Math.max(0, Math.round(((run.finishedAt || Date.now()) - run.startedAt) / 60000))} 分钟`}</p>${run.error ? `<p class="error-text">${escapeHtml(run.error)}</p>` : ''}`;
 }
 
 function renderQueueRow(row) {
@@ -185,6 +218,7 @@ function updateHTML(id, html) {
 function updateLive() {
   renderChrome();
   if (state.view !== 'desk') return;
+  updateHTML('local-vision-model', renderLocalVisionModelContents());
   updateHTML('metrics', renderMetrics());
   updateHTML('batch-progress', renderProgress());
   updateHTML('preflight-checks', renderPreflightChecks());
@@ -193,6 +227,9 @@ function updateLive() {
     updateHTML('library-result', renderLibraryHealth());
     libraryResult._library = state.library;
   }
+  document.querySelectorAll('[data-action="set-bgm-mode"]').forEach((button) => {
+    button.disabled = state.running || state.starting || state.localVisionDownloadBusy;
+  });
   document.querySelectorAll('[data-action="review-track"]').forEach((button) => { button.disabled = state.running || state.checkingLibrary; });
   patchQueue();
   updateHTML('selected-episode-panel', renderSelectedEpisode());
@@ -401,7 +438,9 @@ function loadConfig(defaults) {
     ...stored,
     storyEnabled: Boolean(stored.storyEnabled ?? defaults.storyEnabled ?? false),
     storyPath: typeof stored.storyPath === 'string' ? stored.storyPath : (defaults.storyPath || ''),
-    transcribe: Boolean(stored.storyEnabled ?? defaults.storyEnabled) || (stored.transcribe !== undefined ? Boolean(stored.transcribe) : true),
+    localVisionEnabled: Boolean(stored.localVisionEnabled) && !Boolean(stored.storyEnabled ?? defaults.storyEnabled ?? false),
+    localSubtitlePath: typeof stored.localSubtitlePath === 'string' ? stored.localSubtitlePath : '',
+    transcribe: Boolean(stored.storyEnabled ?? defaults.storyEnabled) || (!stored.localVisionEnabled && (stored.transcribe !== undefined ? Boolean(stored.transcribe) : true)),
     overwrite: Boolean(stored.overwrite),
     autoDuck: stored.autoDuck === undefined ? defaults.autoDuck !== false : Boolean(stored.autoDuck),
     strictInstrumental: stored.strictInstrumental === undefined ? true : Boolean(stored.strictInstrumental),
@@ -436,6 +475,7 @@ async function refresh(quiet = false, live = false) {
     const data = await api.inspectBatch(config);
     if (sequence !== refreshSequence) return;
     state.data = data;
+    if (data.localVision) state.localVision = data.localVision;
     state.preflightPending = false;
     if (!state.selectedEpisode || !state.data.rows.some((row) => row.episode === state.selectedEpisode)) {
       state.selectedEpisode = state.data.rows[0]?.episode || '';
@@ -473,7 +513,17 @@ function videoConfigInput() {
 }
 
 function renderStoryControls() {
-  return `<div class="story-controls"><div class="switch-row"><div class="switch-label"><b>剧情辅助</b><small>启用即授权发送剧本与对白，服务可能计费</small></div><label class="switch"><input id="config-storyEnabled" type="checkbox" role="switch" aria-label="剧情辅助" data-config-key="storyEnabled" ${state.config.storyEnabled ? 'checked' : ''}><span></span></label></div><div class="path-row story-path-row" data-drop-key="storyPath"><label for="config-storyPath">剧本 / 分镜</label><input id="config-storyPath" class="text-input" data-config-key="storyPath" value="${escapeHtml(state.config.storyPath || '')}" placeholder="文档或目录" ${state.config.storyEnabled ? '' : 'disabled'}><button class="pick-button" data-action="choose-story-file" title="选择剧本文档" aria-label="选择剧本文档" ${state.config.storyEnabled ? '' : 'disabled'}>⌕</button><button class="button compact ghost" data-action="choose-story-directory" ${state.config.storyEnabled ? '' : 'disabled'}>目录</button></div></div>`;
+  const mode = bgmPlanningMode();
+  const busy = state.running || state.starting || state.localVisionDownloadBusy;
+  return `<div class="story-controls">
+    <fieldset class="planning-mode"><legend>配乐分析模式</legend><div class="planning-mode-options" role="group" aria-label="配乐分析模式">
+      <button type="button" class="button compact ${mode === 'rules' ? 'primary' : 'ghost'}" data-action="set-bgm-mode" data-mode="rules" aria-pressed="${mode === 'rules'}" ${busy ? 'disabled' : ''}>规则自动</button>
+      <button type="button" class="button compact ${mode === 'story' ? 'primary' : 'ghost'}" data-action="set-bgm-mode" data-mode="story" aria-pressed="${mode === 'story'}" ${busy ? 'disabled' : ''}>剧情 API</button>
+      <button type="button" class="button compact ${mode === 'local' ? 'primary' : 'ghost'}" data-action="set-bgm-mode" data-mode="local" aria-pressed="${mode === 'local'}" ${busy ? 'disabled' : ''}>字幕 + 画面（本地）</button>
+    </div></fieldset>
+    ${mode === 'story' ? `<div class="path-row story-path-row" data-drop-key="storyPath"><label for="config-storyPath">剧本 / 分镜</label><input id="config-storyPath" class="text-input" data-config-key="storyPath" value="${escapeHtml(state.config.storyPath || '')}" placeholder="文档或目录"><button class="pick-button" data-action="choose-story-file" title="选择剧本文档" aria-label="选择剧本文档" ${busy ? 'disabled' : ''}>⌕</button><button class="button compact ghost" data-action="choose-story-directory" ${busy ? 'disabled' : ''}>目录</button></div>` : ''}
+    ${mode === 'local' ? `<div class="path-row local-subtitle-row" data-drop-key="localSubtitlePath"><label for="config-localSubtitlePath">SRT 字幕</label><input id="config-localSubtitlePath" class="text-input" data-config-key="localSubtitlePath" value="${escapeHtml(state.config.localSubtitlePath || '')}" placeholder="同名 .srt 文件或字幕目录" ${busy ? 'disabled' : ''}><button class="pick-button" data-action="choose-subtitle-file" title="选择 SRT 文件" aria-label="选择 SRT 文件" ${busy ? 'disabled' : ''}>⌕</button><button class="button compact ghost" data-action="choose-subtitle-directory" ${busy ? 'disabled' : ''}>目录</button></div><div class="local-vision-model" id="local-vision-model">${renderLocalVisionModelContents()}</div>` : ''}
+  </div>`;
 }
 
 function applyStoryAIProfile(profile) {
@@ -745,7 +795,7 @@ function render(preserveScroll = false) {
   if (state.view === 'desk') {
     document.getElementById('config-transcripts')?.closest('.path-row').insertAdjacentHTML('afterend', renderStoryControls());
     const transcribe = document.querySelector('[data-config-key="transcribe"]');
-    if (transcribe) transcribe.disabled = state.config.storyEnabled;
+    if (transcribe) transcribe.disabled = state.config.storyEnabled || state.config.localVisionEnabled;
   } else if (state.view === 'settings') {
     screen.querySelector('.view-header')?.insertAdjacentHTML('afterend', renderStoryAISettings());
   } else if (['timeline', 'transcript'].includes(state.view)) {
@@ -804,6 +854,38 @@ async function chooseDirectory(key, title) {
   rememberPaths();
   saveConfig();
   await refresh(true);
+}
+
+async function setBgmPlanningMode(mode) {
+  if (state.running || state.starting) return;
+  if (!['rules', 'story', 'local'].includes(mode)) return;
+  state.config.storyEnabled = mode === 'story';
+  state.config.localVisionEnabled = mode === 'local';
+  if (mode === 'story') state.config.transcribe = true;
+  if (mode === 'local') state.config.transcribe = false;
+  saveConfig();
+  render(true);
+  await refresh(true);
+}
+
+async function downloadLocalVision() {
+  if (state.localVisionDownloadBusy || state.running || state.starting) return;
+  state.localVisionDownloadBusy = true;
+  state.localVisionError = '';
+  state.localVisionProgress = { stage: 'preparing' };
+  updateLive();
+  try {
+    state.localVision = await api.downloadLocalVisionAssets();
+    state.localVisionError = '';
+  } catch (error) {
+    state.localVisionError = error.message || '本地模型下载或校验失败，请重试。';
+    showToast(state.localVisionError, true);
+  } finally {
+    state.localVisionDownloadBusy = false;
+    state.localVisionProgress = null;
+    updateLive();
+    await refresh(true);
+  }
 }
 
 async function openDetail(episode, view) {
@@ -926,6 +1008,14 @@ document.addEventListener('click', async (event) => {
       render();
     } else if (action === 'open-update-page') {
       await api.openUpdatePage();
+    } else if (action === 'set-bgm-mode') {
+      await setBgmPlanningMode(target.dataset.mode);
+    } else if (action === 'download-local-vision') {
+      await downloadLocalVision();
+    } else if (action === 'cancel-local-vision') {
+      await api.cancelLocalVisionDownload();
+    } else if (action === 'refresh-local-vision') {
+      await refresh(true);
     } else if (action === 'toggle-maximize') {
       await api.toggleMaximize();
     } else if (action === 'replace-story-ai-key' || action === 'cancel-story-ai-key') {
@@ -1006,7 +1096,7 @@ document.addEventListener('click', async (event) => {
     } else if (action === 'new-batch') {
       if (state.running || state.starting) return;
       if (!window.confirm('新建批次将清空当前目录配置和界面记录，磁盘上的视频、音乐和已有产物都不会删除。是否继续？')) return;
-      state.config = { ...state.config, videos: '', music: '', output: '', transcripts: '', storyPath: '', storyEnabled: false, overwrite: false };
+      state.config = { ...state.config, videos: '', music: '', output: '', transcripts: '', storyPath: '', storyEnabled: false, localVisionEnabled: false, localSubtitlePath: '', overwrite: false };
       state.data = { rows: [], summary: null, warning: null };
       state.selectedEpisode = '';
       state.detail = null;
@@ -1034,6 +1124,11 @@ document.addEventListener('click', async (event) => {
       if (value) { state.config.storyPath = value; saveConfig(); await refresh(true); }
     } else if (action === 'choose-story-directory') {
       await chooseDirectory('storyPath', '选择剧本 / 分镜目录');
+    } else if (action === 'choose-subtitle-file') {
+      const value = await api.chooseSubtitleFile?.();
+      if (value) { state.config.localSubtitlePath = value; rememberPaths(); saveConfig(); await refresh(true); }
+    } else if (action === 'choose-subtitle-directory') {
+      await chooseDirectory('localSubtitlePath', '选择 SRT 字幕目录');
     } else if (action === 'choose-model') {
       await chooseDirectory('modelPath', '选择 语音转录 模型目录');
     } else if (action === 'select-episode') {
@@ -1103,6 +1198,7 @@ document.addEventListener('change', (event) => {
     const { label, ...config } = preset;
     Object.assign(state.config, config);
     if (state.config.storyEnabled) state.config.transcribe = true;
+    if (state.config.localVisionEnabled) state.config.transcribe = false;
     saveConfig();
     refresh(true);
     showToast(`已应用“${label}”预设`);
@@ -1114,12 +1210,13 @@ document.addEventListener('change', (event) => {
   state.config[key] = input.type === 'checkbox' ? input.checked : (['duckDb', 'fadeIn', 'fadeOut', 'transitionFadeDuration', 'minTracksPerEpisode', 'maxTracksPerEpisode', 'maxTrackDuration'].includes(key) ? (input.value === '' ? '' : Number(input.value)) : input.value);
   if (key === 'maxTrackDuration') document.getElementById('track-duration-status').textContent = trackDurationStatus();
   if (state.config.storyEnabled) state.config.transcribe = true;
+  if (state.config.localVisionEnabled) state.config.transcribe = false;
   saveConfig();
   if (key === 'music' || key === 'strictInstrumental') state.library = null;
   clearTimeout(refreshTimer);
   rememberPaths();
   refresh(true, true);
-  if (key === 'storyEnabled') render(true);
+  if (key === 'storyEnabled' || key === 'localVisionEnabled') render(true);
   if (['scenePriority', 'minTracksPerEpisode', 'maxTracksPerEpisode'].includes(key)) syncMusicQuantitySettings();
   const transitionDuration = document.getElementById('config-transitionFadeDuration');
   if (transitionDuration) transitionDuration.disabled = !state.config.transitionFadeEnabled;
@@ -1220,6 +1317,24 @@ api.onUpdateEvent((update) => {
   }
 });
 
+api.onLocalVisionEvent?.((event) => {
+  if (event.type === 'progress') {
+    state.localVisionProgress = {
+      stage: event.stage,
+      asset: event.asset,
+      transferred: Number(event.transferred) || 0,
+      total: Number(event.total) || 0,
+      percent: Number.isFinite(event.percent) ? event.percent : null,
+    };
+  } else if (event.type === 'ready') {
+    state.localVision = event.status;
+    state.localVisionError = '';
+    state.localVisionDownloadBusy = false;
+    state.localVisionProgress = null;
+  }
+  updateLive();
+});
+
 (async () => {
   try {
     const info = await api.appInfo();
@@ -1228,6 +1343,7 @@ api.onUpdateEvent((update) => {
     applyUpdateState(info.update);
     state.defaults = info.defaults || {};
     state.bundledRuntime = Boolean(info.bundledRuntime);
+    state.localVision = info.localVision || state.localVision;
     applyStoryAIProfile(info.storyAI);
     state.config = loadConfig(state.defaults);
     if (!state.run || !info.run || (info.run.estimatedAt || 0) >= (state.run.estimatedAt || 0)) {
@@ -1237,9 +1353,10 @@ api.onUpdateEvent((update) => {
     }
     if (state.running && state.run?.config) Object.assign(state.config, state.run.config);
     if (state.config.storyEnabled) state.config.transcribe = true;
+    if (state.config.localVisionEnabled) state.config.transcribe = false;
     try {
       const recent = JSON.parse(localStorage.getItem('bgm-studio-recent-paths') || '{}');
-      for (const key of ['videos', 'music', 'output', 'transcripts', 'modelPath']) state.recentPaths[key] = Array.isArray(recent[key]) ? recent[key].filter((value) => typeof value === 'string').slice(0, 5) : [];
+      for (const key of ['videos', 'music', 'output', 'transcripts', 'modelPath', 'localSubtitlePath']) state.recentPaths[key] = Array.isArray(recent[key]) ? recent[key].filter((value) => typeof value === 'string').slice(0, 5) : [];
     } catch { state.recentPaths = {}; }
     if (state.bundledRuntime) Object.assign(state.config, { modelPath: state.defaults.modelPath, ffmpeg: state.defaults.ffmpeg, ffprobe: state.defaults.ffprobe });
     await refresh(true);

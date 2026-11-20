@@ -6,7 +6,10 @@ const { spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { cachePath, filterLibrary, readLibrary, writeLibrary, ANALYSIS_VERSION, ANALYSIS_SETTINGS, MODEL_SHA256 } = require('./music-library');
 const { assertStoryTranscript, buildStoryMusicPlan, publicStoryProfile } = require('./story-music-plan');
+const { buildLocalVisionMusicPlan } = require('./local-vision-plan');
 const { loadStoryDocument, STORY_EXTENSIONS } = require('./story-input');
+const { findSubtitleForVideo } = require('./subtitles');
+const { withSampledVideoFrames } = require('./video-frames');
 const { deduplicateMusic } = require('./music-dedup');
 const { canonicalMood, chooseTrack, describeTrackSelection, findCompatibleMoodFolder, findMoodFolder, selectionReason } = require('./music-selection');
 const { DEFAULT_MAX_TRACK_DURATION, DEFAULT_TRANSITION_FADE_SECONDS, enforceTrackDuration, maxTrackDuration, playbackWindows, transitionFadeSeconds } = require('./track-duration');
@@ -15,7 +18,7 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi', '.m4v
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
 const DEFAULT_MOOD = '默认';
 const STATE_VERSION = 14;
-const PLANNING_VERSION = 'single-track-duration-v7';
+const PLANNING_VERSION = 'single-track-duration-v8-local-vision';
 
 const MOOD_RULES = [
   { mood: '紧张', words: ['危险', '追杀', '逃跑', '快跑', '小心', '冲突', '打架', '绑架', '枪', '杀', '来不及', '怎么办', '救命', '别过来', 'danger', 'chase', 'run away', 'hurry', 'hurry up', 'careful', 'kidnap', 'kidnapped', 'gun', 'kill', 'killed', 'fight', 'fighting', "we're running out of time", 'what do we do', "don't come", "i'm scared", "i'm afraid", 'please help', 'help me', 'get out of here', 'we have to go', "they're coming", "we're trapped"] },
@@ -200,11 +203,17 @@ function episodeArtifacts(videoPath, outputDir) {
 
 const ARTIFACT_KEYS = ['outputPath', 'finalVideoPath', 'timelinePath', 'transcriptPath'];
 
-function storyFingerprintFor(options, document) {
+function storyFingerprintFor(options, document, subtitleStat, videoStat) {
   return createHash('sha256').update(JSON.stringify({
     enabled: Boolean(options.storyEnabled), document: document?.signature || null,
     profile: options.storyEnabled ? publicStoryProfile(options.storyAIProfile) : null,
-    version: 'story-anchored-v1',
+    localVisionEnabled: Boolean(options.localVisionEnabled),
+    subtitle: options.localVisionEnabled && subtitleStat
+      ? [subtitleStat.path, subtitleStat.size, Math.trunc(subtitleStat.mtimeMs), Math.trunc(subtitleStat.ctimeMs), subtitleStat.contentSha256] : null,
+    video: options.localVisionEnabled && videoStat
+      ? [videoStat.size, Math.trunc(videoStat.mtimeMs), Math.trunc(videoStat.ctimeMs), Math.trunc(videoStat.birthtimeMs)] : null,
+    modelRevision: options.localVisionEnabled ? options.localVisionModelRevision || '' : '',
+    version: options.localVisionEnabled ? 'local-visual-srt-v1' : 'story-anchored-v1',
   })).digest('hex');
 }
 
@@ -627,6 +636,7 @@ function buildMusicPlan(context) {
 
 function buildUnboundedMusicPlan(context) {
   const { duration, transcript, groups, options, trackUses, sceneCuts = [] } = context;
+  if (options.localVisionEnabled) return buildLocalVisionMusicPlan(context, context.localVisionPlan, chooseTrack);
   if (options.storyEnabled) return buildStoryMusicPlan({ ...context, planningVersion: PLANNING_VERSION }, chooseTrack);
   const scenePriority = options.scenePriority !== false;
   const requestedSegmentLimit = Number(options.maxTracksPerEpisode ?? 3);
@@ -1029,7 +1039,7 @@ async function removeIfExists(filePath) {
   }
 }
 
-async function renderEpisode({ videoPath, outputDir, groups, state, options, catalogSignature, libraryUnavailableReason, storyInput, onProcessing, onStage, onRepair }) {
+async function renderEpisode({ videoPath, outputDir, groups, state, options, catalogSignature, libraryUnavailableReason, storyInput, onProcessing, onStage, onRepair, onVisionProgress }) {
   const episode = path.parse(videoPath).name;
   const {
     outputPath, timelinePath, finalVideoPath, asrTranscriptPath,
@@ -1073,13 +1083,60 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     const freezeTailSeconds = freezeTailDuration(options.freezeTail, probe.frameRate);
     if (freezeTailSeconds >= probe.duration) throw new Error('片尾定格时长必须小于视频总时长');
     const musicDuration = probe.duration - freezeTailSeconds;
+    if (storyInput?.error) throw storyInput.error;
+    const localSubtitle = options.localVisionEnabled
+      ? await findSubtitleForVideo(videoPath, options.localSubtitlePath, options.localSubtitleVideoCount || 1, probe.duration)
+      : null;
+    const localSubtitleStat = localSubtitle ? await fs.stat(localSubtitle.path) : null;
+    const transcript = localSubtitle || await findTranscript(videoPath, options.transcripts, probe.duration);
+    const transcriptStat = transcript ? await fs.stat(transcript.path) : null;
+    const transcriptionModel = options.transcribe ? (options.modelPath || process.env.FASTER_WHISPER_MODEL || 'small') : null;
+    const transcriptionLanguage = options.transcribe ? (options.language || process.env.FASTER_WHISPER_LANGUAGE || 'auto') : null;
     // Story identity is checked before the intentionally permissive legacy resume shortcut.
     const document = storyInput?.document || null;
-    const storyFingerprint = storyFingerprintFor(options, document);
-    const sameStory = options.storyEnabled
+    const storyFingerprint = storyFingerprintFor(options, document, localSubtitleStat
+      ? { path: localSubtitle.path, size: localSubtitleStat.size, mtimeMs: localSubtitleStat.mtimeMs,
+        ctimeMs: localSubtitleStat.ctimeMs, contentSha256: localSubtitle.contentSha256 }
+      : null, sourceStat);
+    const signature = createHash('sha256').update(JSON.stringify({
+      version: STATE_VERSION,
+      finalVideo: true,
+      sourceSize: sourceStat.size,
+      sourceMtimeMs: Math.trunc(sourceStat.mtimeMs),
+      sourceCtimeMs: Math.trunc(sourceStat.ctimeMs),
+      sourceBirthtimeMs: Math.trunc(sourceStat.birthtimeMs),
+      catalogSignature,
+      mood: options.mood,
+      scenePriority: options.scenePriority !== false,
+      minTracksPerEpisode: options.minTracksPerEpisode,
+      transcribe: options.transcribe,
+      localVisionEnabled: Boolean(options.localVisionEnabled),
+      transcriptionModel,
+      transcriptionLanguage,
+      transcript: transcriptStat && [transcript.path, transcriptStat.size, Math.trunc(transcriptStat.mtimeMs),
+        Math.trunc(transcriptStat.ctimeMs), localSubtitle?.contentSha256],
+      duckDb: options.duckDb,
+      autoDuck: options.autoDuck,
+      freezeTail: options.freezeTail || '0:00',
+      maxTracksPerEpisode: options.maxTracksPerEpisode > 0 ? options.maxTracksPerEpisode : undefined,
+      maxTrackDuration: maxTrackDuration(options),
+      fadeIn: options.fadeIn,
+      fadeOut: options.fadeOut,
+      transitionFadeEnabled: options.transitionFadeEnabled !== false,
+      transitionFadeDuration: transitionFadeSeconds(options),
+      strictInstrumental: options.strictInstrumental !== false,
+      analysisVersion: ANALYSIS_VERSION,
+      analysisSettings: ANALYSIS_SETTINGS,
+      modelSha256: MODEL_SHA256,
+      planningVersion: PLANNING_VERSION,
+      storyFingerprint,
+    })).digest('hex');
+    const sameStory = options.localVisionEnabled
+      ? existing?.localVisionEnabled === true && existing?.storyFingerprint === storyFingerprint && Boolean(existing?.analysis?.localVision)
+      : options.storyEnabled
       ? existing?.storyFingerprint === storyFingerprint && Boolean(existing?.analysis?.story)
-      : !existing?.storyEnabled && !existing?.analysis?.story;
-    const transcriptRequired = Boolean(options.transcribe && probe.hasAudio);
+      : !existing?.storyEnabled && !existing?.localVisionEnabled && !existing?.analysis?.story && !existing?.analysis?.localVision;
+    const transcriptRequired = Boolean(options.localVisionEnabled || options.transcribe && probe.hasAudio);
     const ownsAsrTranscript = existing?.transcriptPath === asrTranscriptPath;
     if (!options.overwrite && selectedOutputs.outputTranscript && transcriptRequired && await pathExists(asrTranscriptPath) && !ownsAsrTranscript) {
       throw new Error('转录输出已存在，拒绝覆盖非本程序创建的文件: ' + asrTranscriptPath);
@@ -1088,6 +1145,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     const transcriptOutputValid = !selectedOutputs.outputTranscript || !transcriptRequired ||
       (ownsAsrTranscript && existingFingerprints.transcriptPath === storyFingerprint && await pathExists(asrTranscriptPath));
     if (!repairsSelectedOutput && options.skipCompleted !== false && existing?.status === 'completed' && sameStory &&
+      (!options.localVisionEnabled || existing.signature === signature) &&
       (!selectedOutputs.outputAudio || (existingFingerprints.outputPath === storyFingerprint && existing.outputPath === outputPath && await outputIsValid(outputPath, musicDuration, options.ffprobe, options.ffmpeg, options.signal, Boolean(existing.analysis?.segments?.length && existing.analysis.segments.every((segment) => !segment.track))))) &&
       (!selectedOutputs.outputVideo || (existingFingerprints.finalVideoPath === storyFingerprint && existing.finalVideoPath === finalVideoPath && await finalVideoIsValid(finalVideoPath, probe.duration, options.ffprobe, options.ffmpeg, options.signal))) &&
       (!selectedOutputs.outputTimeline || (existingFingerprints.timelinePath === storyFingerprint && existing.timelinePath === timelinePath && await pathExists(timelinePath))) && transcriptOutputValid) {
@@ -1126,42 +1184,9 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     }
 
     onProcessing?.();
-    const transcript = await findTranscript(videoPath, options.transcripts, probe.duration);
-    const transcriptStat = transcript ? await fs.stat(transcript.path) : null;
-    const transcriptionModel = options.transcribe ? (options.modelPath || process.env.FASTER_WHISPER_MODEL || 'small') : null;
-    const transcriptionLanguage = options.transcribe ? (options.language || process.env.FASTER_WHISPER_LANGUAGE || 'auto') : null;
-    const signature = createHash('sha256').update(JSON.stringify({
-      version: STATE_VERSION,
-      finalVideo: true,
-      sourceSize: sourceStat.size,
-      sourceMtimeMs: sourceStat.mtimeMs,
-      catalogSignature,
-      mood: options.mood,
-      scenePriority: options.scenePriority !== false,
-      minTracksPerEpisode: options.minTracksPerEpisode,
-      transcribe: options.transcribe,
-      transcriptionModel,
-      transcriptionLanguage,
-      transcript: transcriptStat && [transcript.path, transcriptStat.size, transcriptStat.mtimeMs],
-      duckDb: options.duckDb,
-      autoDuck: options.autoDuck,
-      freezeTail: options.freezeTail || '0:00',
-      maxTracksPerEpisode: options.maxTracksPerEpisode > 0 ? options.maxTracksPerEpisode : undefined,
-      maxTrackDuration: maxTrackDuration(options),
-      fadeIn: options.fadeIn,
-      fadeOut: options.fadeOut,
-      transitionFadeEnabled: options.transitionFadeEnabled !== false,
-      transitionFadeDuration: transitionFadeSeconds(options),
-      strictInstrumental: options.strictInstrumental !== false,
-      analysisVersion: ANALYSIS_VERSION,
-      analysisSettings: ANALYSIS_SETTINGS,
-      modelSha256: MODEL_SHA256,
-      planningVersion: PLANNING_VERSION,
-      storyFingerprint,
-    })).digest('hex');
-
     state.episodes[stateKey] = {
-      ...existing, episode, status: 'processing', error: '', signature, storyFingerprint, storyEnabled: Boolean(options.storyEnabled),
+      ...existing, episode, status: 'processing', error: '', signature, storyFingerprint,
+      storyEnabled: Boolean(options.storyEnabled), localVisionEnabled: Boolean(options.localVisionEnabled),
       pendingSilenceRepairs: planningStatus.repairArtifacts,
       artifactStoryFingerprints: existingFingerprints,
       sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs,
@@ -1195,6 +1220,26 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       storyPlan = await options.createStoryPlan({ document, transcript: activeTranscript, groups, sceneCuts, duration: musicDuration, signal: options.signal });
       options.signal?.throwIfAborted();
     }
+    let localVisionPlan;
+    if (options.localVisionEnabled) {
+      if (typeof options.createLocalVisionPlan !== 'function') throw new Error('本地画面配乐模型未配置，请在设置中下载并校验模型。');
+      stage('sampling-frames');
+      localVisionPlan = await withSampledVideoFrames(videoPath, musicDuration, sceneCuts, {
+        ffmpeg: options.ffmpeg,
+        signal: options.signal,
+        onProgress: (progress) => onVisionProgress?.({ stage: 'sampling-frames', frame: progress.completed, frames: progress.total }),
+        async analyze(frames) {
+          stage('analyzing-vision');
+          options.signal?.throwIfAborted();
+          const plan = await options.createLocalVisionPlan({
+            transcript: activeTranscript, frames, groups, sceneCuts, duration: musicDuration, signal: options.signal,
+            onProgress: (progress) => onVisionProgress?.(progress),
+          });
+          options.signal?.throwIfAborted();
+          return { ...plan, frames: frames.map(({ time }) => ({ time })) };
+        },
+      });
+    }
     stage('planning');
     const intervals = mergeIntervals(activeTranscript?.segments || [], probe.duration);
     const musicPlan = buildMusicPlan({
@@ -1206,6 +1251,8 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
       sceneCuts,
       document,
       storyPlan,
+      frames: localVisionPlan?.frames,
+      localVisionPlan,
     });
     const filter = buildMultiTrackFilter(musicPlan.segments, musicDuration, options, intervals, probe.hasAudio);
 
@@ -1242,10 +1289,10 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     if (selectedOutputs.outputAudio) await fs.rename(tempOutputPath, outputPath);
     if (selectedOutputs.outputVideo) await fs.rename(tempFinalVideoPath, finalVideoPath);
     if (selectedOutputs.outputTimeline) await fs.rename(tempTimelinePath, timelinePath);
-    const saveTranscript = Boolean(selectedOutputs.outputTranscript && options.transcribe && activeTranscript);
+    const saveTranscript = Boolean(selectedOutputs.outputTranscript && (options.transcribe || options.localVisionEnabled) && activeTranscript);
     if (saveTranscript) {
       const savedTranscript = {
-        source: activeTranscript.source,
+        source: activeTranscript.source || (options.localVisionEnabled ? 'srt' : 'asr'),
         ...(activeTranscript.language ? { language: activeTranscript.language, language_probability: activeTranscript.languageProbability } : {}),
         segments: activeTranscript.segments,
       };
@@ -1260,6 +1307,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     stage('completed');
     const analysis = { version: PLANNING_VERSION, vocalVersion: ANALYSIS_VERSION, strictInstrumental: options.strictInstrumental !== false,
       ...(musicPlan.story ? { story: musicPlan.story } : {}),
+      ...(musicPlan.localVision ? { localVision: musicPlan.localVision } : {}),
       wordTimestamps: Boolean(activeTranscript?.segments.some((segment) => segment.words?.length)), sceneCandidates: musicPlan.sceneCandidates, sceneError,
       segments: musicPlan.segments, timings, scenePriority: options.scenePriority !== false, trackCount: musicPlan.trackCount,
       maxTrackDuration: maxTrackDuration(options),
@@ -1269,7 +1317,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     };
     const fingerprints = { ...existingFingerprints };
     // A fresh model plan can differ for identical inputs; it cannot certify retained artifacts.
-    if (options.storyEnabled) {
+    if (options.storyEnabled || options.localVisionEnabled) {
       for (const [key, selected] of Object.entries({ outputPath: selectedOutputs.outputAudio,
         finalVideoPath: selectedOutputs.outputVideo, timelinePath: selectedOutputs.outputTimeline })) {
         if (!selected && existing?.[key]) fingerprints[key] = null;
@@ -1281,6 +1329,7 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
     if (saveTranscript) fingerprints.transcriptPath = storyFingerprint;
     state.episodes[stateKey] = {
       ...state.episodes[stateKey], status: 'completed', signature, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs,
+      localVisionEnabled: Boolean(options.localVisionEnabled),
       pendingSilenceRepairs: planningStatus.repairArtifacts.filter((key) => !selectedArtifacts[key]),
       artifactStoryFingerprints: fingerprints,
       episode, videoPath, ...selectedOutputs,
@@ -1325,6 +1374,8 @@ async function renderEpisode({ videoPath, outputDir, groups, state, options, cat
 async function runBatch(options, logger = console) {
   maxTrackDuration(options);
   if (options.storyEnabled !== undefined && typeof options.storyEnabled !== 'boolean') throw new Error('剧情辅助必须使用开关值');
+  if (options.localVisionEnabled !== undefined && typeof options.localVisionEnabled !== 'boolean') throw new Error('本地画面配乐必须使用开关值');
+  if (options.storyEnabled && options.localVisionEnabled) throw new Error('剧情 API 与本地画面配乐只能选择一种模式。');
   if (options.storyEnabled) {
     if (typeof options.createStoryPlan !== 'function') throw new Error('剧情辅助模型未配置，请在设置中配置模型服务后重试。');
     if (typeof options.storyPath !== 'string' || !options.storyPath.trim()) throw new Error('请选择剧情辅助使用的剧本或分镜文件/目录。');
@@ -1332,6 +1383,16 @@ async function runBatch(options, logger = console) {
     try { stat = await fs.stat(options.storyPath); } catch { throw new Error('剧本或分镜路径不可访问，请重新选择文件或目录。'); }
     if (!stat.isFile() && !stat.isDirectory()) throw new Error('剧本或分镜路径必须是文件或目录。');
     options.transcribe = true;
+  }
+  if (options.localVisionEnabled) {
+    if (typeof options.createLocalVisionPlan !== 'function') throw new Error('本地画面配乐模型未配置，请在设置中下载并校验模型。');
+    if (typeof options.localSubtitlePath !== 'string' || !options.localSubtitlePath.trim()) throw new Error('请选择 SRT 字幕文件或字幕目录。');
+    let stat;
+    try { stat = await fs.stat(options.localSubtitlePath); } catch { throw new Error('SRT 字幕路径不可访问，请重新选择文件或目录。'); }
+    if (!stat.isFile() && !stat.isDirectory() || stat.isFile() && path.extname(options.localSubtitlePath).toLowerCase() !== '.srt') {
+      throw new Error('本地画面配乐仅支持 SRT 文件或字幕目录。');
+    }
+    options.transcribe = false;
   }
   if (!['all', 'unfinished', 'failed', 'episode'].includes(options.runMode || 'all')) throw new Error('不支持的批次恢复方式');
   const videosPath = normalizePath(options.videos);
@@ -1378,6 +1439,7 @@ async function runBatch(options, logger = console) {
   if (options.runMode === 'failed') videos = videos.filter((video) => state.episodes[normalizePath(video)]?.status === 'failed');
   if (options.runMode === 'episode') videos = videos.filter((video) => normalizePath(video) === normalizePath(options.episodeVideoPath || ''));
   if (!videos.length) throw new Error('没有符合条件的视频；请刷新队列并检查失败项或当前选集');
+  if (options.localVisionEnabled) options.localSubtitleVideoCount = videos.length;
   if (options.runMode === 'unfinished') options.skipCompleted = true;
   if (['failed', 'episode'].includes(options.runMode)) options.skipCompleted = false;
   logger.progress?.({ stage: 'scanning', total: videos.length, videosPath, musicPath, outputPath });
@@ -1409,7 +1471,8 @@ async function runBatch(options, logger = console) {
   const catalogRows = await Promise.all([...groups.values()].flat().map(async (file) => {
     const stat = await fs.stat(file);
     const metadata = options.trackMetadata.get(file);
-    return [normalizePath(file), stat.size, stat.mtimeMs, metadata.status, metadata.cueIn || 0, metadata.intensity || null];
+    return [normalizePath(file), stat.size, Math.trunc(stat.mtimeMs), Math.trunc(stat.ctimeMs),
+      metadata.status, metadata.cueIn || 0, metadata.intensity || null];
   }));
   const catalogSignature = createHash('sha256').update(JSON.stringify(catalogRows)).digest('hex');
   const results = [];
@@ -1438,6 +1501,14 @@ async function runBatch(options, logger = console) {
           if (!checkingCompleted) return;
           logger.progress?.({ ...progress, status: 'processing' });
           logger.log('[' + (index + 1) + '/' + videos.length + '] ' + path.basename(videoPath));
+        },
+        onVisionProgress(event) {
+          const safeProgress = Object.fromEntries(
+            ['stage', 'frame', 'frames', 'completed', 'total', 'percent', 'backend', 'gpu']
+              .filter((key) => event?.[key] !== undefined)
+              .map((key) => [key, event[key]]),
+          );
+          logger.progress?.({ ...progress, ...safeProgress });
         },
       });
       results.push(result);

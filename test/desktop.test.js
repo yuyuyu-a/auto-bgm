@@ -299,6 +299,52 @@ test('story desktop start rejects invalid switches, unavailable documents and mi
   assert.equal(getInfo().running, false);
 });
 
+test('local visual batch requires one exclusive mode, a valid SRT source, and verified model assets', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-local-visual-preflight-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const video = path.join(root, 'episode.mp4');
+  const subtitle = path.join(root, 'episode.srt');
+  const music = path.join(root, 'music');
+  await Promise.all([
+    fs.writeFile(video, 'video'),
+    fs.writeFile(subtitle, '1\n00:00:00,000 --> 00:00:01,000\nHello.\n'),
+    fs.mkdir(music),
+  ]);
+  const base = { videos: video, music, output: path.join(root, 'output'), transcribe: false,
+    localVisionEnabled: true, localSubtitlePath: subtitle, storyPath: music,
+    createLocalVisionPlan: async () => ({}) };
+  await assert.rejects(startBatch({ ...base, storyEnabled: true }, () => {}, {
+    createStoryPlan: async () => ({}), localVisionStatus: { ready: true },
+  }), /只能选择一种模式/);
+  await assert.rejects(startBatch(base, () => {}, { localVisionStatus: { ready: false } }), /本地画面.*模型|模型.*下载/);
+  await assert.rejects(startBatch({ ...base, localSubtitlePath: path.join(root, 'missing.srt') }, () => {}, {
+    localVisionStatus: { ready: true },
+  }), /SRT 字幕路径不可访问/);
+  await assert.rejects(startBatch({ ...base, createLocalVisionPlan: undefined }, () => {}, {
+    localVisionStatus: { ready: true },
+  }), /本地画面.*模型未配置/);
+  assert.equal(getInfo().running, false);
+});
+
+test('local visual preflight exposes only sanitized model readiness and subtitle availability', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-local-visual-status-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const subtitle = path.join(root, 'episode.srt');
+  await fs.writeFile(subtitle, '1\n00:00:00,000 --> 00:00:01,000\nHello.\n');
+  const info = await inspectBatch({
+    videos: root, music: root, output: root, localVisionEnabled: true, localSubtitlePath: subtitle,
+    createLocalVisionPlan() {},
+    localVisionStatus: { ready: false, modelBytes: 512, backend: 'cpu', root: 'PRIVATE_MODEL_PATH', prompt: 'PRIVATE_PROMPT' },
+  });
+  assert.equal(info.paths.localSubtitlePath.status, 'available');
+  assert.deepEqual(info.localVision, { enabled: true, ready: false, modelBytes: 512, backend: 'cpu' });
+  assert.doesNotMatch(JSON.stringify(info.localVision), /PRIVATE_MODEL_PATH|PRIVATE_PROMPT/);
+  assert.match(info.validationError, /本地画面配乐模型/);
+  const diagnosticsText = await diagnostics({ localVisionEnabled: true, localSubtitlePath: 'PRIVATE_SUBTITLE_PATH' });
+  assert.match(diagnosticsText, /localVisionEnabled/);
+  assert.doesNotMatch(diagnosticsText, /PRIVATE_SUBTITLE_PATH|PRIVATE_MODEL_PATH|PRIVATE_PROMPT/);
+});
+
 test('story drag import accepts documents and directories only in the explicit story role', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-story-import-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

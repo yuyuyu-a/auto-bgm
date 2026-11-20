@@ -395,10 +395,10 @@ test('saved duration changes leave completed media intact until regeneration and
   assert.match(timeline, /单曲连续播放上限 1.5 秒/);
 });
 
-async function makeVideo(filePath, duration = 2.5) {
+async function makeVideo(filePath, duration = 2.5, color = 'blue') {
   await execFileAsync(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-y',
-    '-f', 'lavfi', '-i', `color=c=blue:s=320x240:r=25:d=${duration}`,
+    '-f', 'lavfi', '-i', `color=c=${color}:s=320x240:r=25:d=${duration}`,
     '-f', 'lavfi', '-i', `sine=frequency=880:sample_rate=16000:duration=${duration}`,
     '-t', String(duration), '-c:v', 'mpeg4', '-q:v', '5', '-c:a', 'aac', '-shortest', filePath,
   ], { windowsHide: true });
@@ -1418,6 +1418,120 @@ function syntheticStoryPlan() {
       { startSegment: 2, mood: '浪漫', intensity: 2, reason: 'The farewell recalls their bond.', confidence: 0.9, review: false },
     ] };
 }
+
+test('local visual mode plans from SRT and sampled frames without an API or speech model', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-local-visual-batch-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const video = path.join(root, 'episode.mp4');
+  const music = path.join(root, 'music');
+  const subtitle = path.join(root, 'episode.srt');
+  const output = path.join(root, 'output');
+  await fs.mkdir(path.join(music, '紧张'), { recursive: true });
+  await makeVideo(video, 4);
+  const track = path.join(music, '紧张', 'pulse.wav');
+  await makeAudio(track, 330);
+  await fs.writeFile(subtitle, '1\n00:00:00,200 --> 00:00:01,100\nWatch the door.\n\n2\n00:00:02,000 --> 00:00:03,000\nSomeone is coming.\n', 'utf8');
+  let received;
+  const progress = [];
+  let planCalls = 0;
+  const options = {
+    videos: video, music, output, ffmpeg, ffprobe, strictInstrumental: false, transcribe: false,
+    localVisionEnabled: true, localSubtitlePath: subtitle, outputVideo: false,
+    createLocalVisionPlan: async (context) => {
+      planCalls += 1;
+      received = context;
+      const plan = {
+        summary: 'A threat approaches.',
+        alignmentConfidence: 0.9,
+        cues: [{
+          startSegment: 0, mood: '紧张', intensity: 2, confidence: 0.9, review: false,
+          sceneDescription: 'A closed doorway.',
+          dramaticIntent: 'Build anticipation.',
+          reason: 'The dialogue and doorway establish an approaching threat.',
+          evidence: { frameTimes: [context.frames[0].time], subtitleIndices: [0] },
+        }],
+      };
+      context.onProgress({ stage: 'vision-completed', backend: 'cpu', gpu: false });
+      return plan;
+    },
+  };
+  const result = await runBatch(options, { log() {}, error() {}, progress(event) { progress.push(event); } });
+
+  assert.equal(result.completed, 1, JSON.stringify(result.results));
+  assert.ok(progress.some((event) => event.stage === 'sampling-frames' && event.frames > 0));
+  assert.ok(progress.some((event) => event.stage === 'analyzing-vision'));
+  assert.ok(progress.some((event) => event.stage === 'vision-completed'));
+  assert.equal(received.transcript.source, 'srt');
+  assert.deepEqual(received.transcript.segments.map(({ start, end }) => [start, end]), [[0.2, 1.1], [2, 3]]);
+  assert.ok(received.frames.length > 0 && received.frames.length <= 24);
+  assert.ok(received.frames.every(({ path: framePath }) => framePath.startsWith(os.tmpdir())));
+  assert.equal(result.results[0].tracks[0], track);
+  assert.equal(result.results[0].analysis.localVision.cues[0].dramaticIntent, 'Build anticipation.');
+  const savedTranscript = JSON.parse(await fs.readFile(path.join(output, 'episode_transcript.json'), 'utf8'));
+  assert.equal(savedTranscript.source, 'srt');
+  assert.deepEqual(savedTranscript.segments.map(({ start, end }) => [start, end]), [[0.2, 1.1], [2, 3]]);
+  assert.ok(await wavRms(result.results[0].outputPath, 0.3, 0.8) > 0.001);
+
+  const unchanged = await runBatch(options, { log() {}, error() {} });
+  assert.equal(unchanged.skipped, 1);
+  assert.equal(planCalls, 1);
+  const changedSelectionSetting = await runBatch({ ...options, fadeIn: 0.25 }, { log() {}, error() {} });
+  assert.equal(changedSelectionSetting.completed, 1);
+  assert.equal(planCalls, 2, 'local visual outputs must invalidate when a planning/render setting changes');
+  const subtitleBefore = await fs.stat(subtitle);
+  const originalSubtitle = await fs.readFile(subtitle, 'utf8');
+  await fs.writeFile(subtitle, originalSubtitle.replace('Watch', 'Guard'), 'utf8');
+  await fs.utimes(subtitle, subtitleBefore.atime, subtitleBefore.mtime);
+  const changedSubtitle = await runBatch(options, { log() {}, error() {} });
+  assert.equal(changedSubtitle.completed, 1);
+  assert.equal(planCalls, 3, 'changed SRT content must invalidate even when file size and modification time match');
+  const videoBefore = await fs.stat(video);
+  await makeVideo(video, 4, 'red');
+  await fs.utimes(video, videoBefore.atime, videoBefore.mtime);
+  const videoAfter = await fs.stat(video);
+  assert.equal(videoAfter.size, videoBefore.size);
+  assert.ok(Math.abs(videoAfter.mtimeMs - videoBefore.mtimeMs) <= 2,
+    'restored video modification time should differ by no more than filesystem timestamp precision');
+  const changedSource = await runBatch(options, { log() {}, error() {} });
+  assert.equal(changedSource.completed, 1);
+  assert.equal(planCalls, 4, 'changed video content must invalidate even when file size and modification time match');
+});
+
+test('single-episode local visual rerun accepts its explicitly selected SRT beside other videos', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-local-visual-single-srt-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const videos = path.join(root, 'videos');
+  const music = path.join(root, 'music');
+  const subtitle = path.join(root, 'episode-one.srt');
+  const targetVideo = path.join(videos, 'episode-one.mp4');
+  await Promise.all([
+    fs.mkdir(videos, { recursive: true }),
+    fs.mkdir(path.join(music, '温情'), { recursive: true }),
+  ]);
+  await makeVideo(targetVideo, 4);
+  await makeVideo(path.join(videos, 'episode-two.mp4'), 4);
+  await makeAudio(path.join(music, '温情', 'warm.wav'), 330);
+  await fs.writeFile(subtitle, '1\n00:00:00,200 --> 00:00:01,100\nStay with me.\n', 'utf8');
+  const result = await runBatch({
+    videos, music, output: path.join(root, 'output'), ffmpeg, ffprobe,
+    strictInstrumental: false, transcribe: false, localVisionEnabled: true,
+    localSubtitlePath: subtitle, runMode: 'episode', episodeVideoPath: targetVideo,
+    outputVideo: false, outputTranscript: false,
+    createLocalVisionPlan: async (context) => ({
+      summary: 'A quiet reunion.',
+      alignmentConfidence: 0.9,
+      cues: [{
+        startSegment: 0, mood: '温情', intensity: 1, confidence: 0.9,
+        sceneDescription: 'Two people meet again.',
+        dramaticIntent: 'Hold a gentle reunion.',
+        reason: 'The subtitle and scene support a warm cue.',
+        evidence: { frameTimes: [context.frames[0].time], subtitleIndices: [0] },
+      }],
+    }),
+  }, { log() {}, error() {} });
+  assert.equal(result.completed, 1, JSON.stringify(result.results));
+  assert.equal(result.results[0].episode, 'episode-one');
+});
 
 test('story-assisted batch renders local tracks at ASR anchors with exact silence and safe provenance', async (t) => {
   const fixture = await storyFixture(t);
