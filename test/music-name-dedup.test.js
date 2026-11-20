@@ -3,12 +3,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const { createHash } = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { inspectMusicCatalog, runBatch, scanMusic } = require('../src/mvp');
-const { checkMusicLibrary, inspectBatch } = require('../desktop/backend/batch-service');
+const { checkMusicLibrary, inspectBatch, stopLibraryAnalysis } = require('../desktop/backend/batch-service');
 const { filterLibrary, fingerprint, readLibrary, reviewTrack } = require('../src/music-library');
 
 const execute = promisify(execFile);
@@ -47,6 +48,48 @@ test('library health skips same-name copies before decoding and retains their mo
   assert.equal(await fs.readFile(duplicate, 'utf8'), 'different content that must never be decoded');
   const preflight = await inspectBatch({ ...options, ffmpeg, ffprobe });
   assert.equal(preflight.musicCount, 1);
+});
+
+test('library health reuses content hashes until a representative file fingerprint changes', async (t) => {
+  const options = await fixture(t);
+  const copy = path.join(options.music, 'album2', 'same-audio-different-name.wav');
+  await fs.copyFile(options.original, copy);
+  let hashCount = 0;
+  const hashFile = async (file) => {
+    hashCount += 1;
+    return createHash('sha256').update(await fs.readFile(file)).digest('hex');
+  };
+  const config = { ...options, ffmpeg, ffprobe, strictInstrumental: false };
+
+  const first = await checkMusicLibrary(config, undefined, { hashFile });
+  assert.equal(hashCount, 2);
+  assert.deepEqual(first.duplicates.filter(({ kind }) => !kind).map(({ file, original }) => ({ file, original })),
+    [{ file: options.original, original: copy }]);
+  const saved = await readLibrary(options.music, options);
+  assert.match(saved.health[options.original].contentHash, /^[a-f0-9]{64}$/);
+  assert.match(saved.health[copy].contentHash, /^[a-f0-9]{64}$/);
+
+  const second = await checkMusicLibrary(config, undefined, { hashFile });
+  assert.equal(hashCount, 2);
+  assert.deepEqual(second.duplicates.filter(({ kind }) => !kind).map(({ file, original }) => ({ file, original })),
+    [{ file: options.original, original: copy }]);
+
+  await fs.appendFile(copy, 'changed');
+  const changed = await checkMusicLibrary(config, undefined, { hashFile });
+  assert.equal(hashCount, 3);
+  assert.deepEqual(changed.duplicates.filter(({ kind }) => !kind), []);
+});
+
+test('cancelling content hashing aborts the health check instead of reporting unreadable media', async (t) => {
+  const options = await fixture(t);
+  await assert.rejects(checkMusicLibrary({
+    ...options, ffmpeg, ffprobe, strictInstrumental: false,
+  }, undefined, {
+    hashFile: async (_file, signal) => {
+      stopLibraryAnalysis();
+      signal.throwIfAborted();
+    },
+  }), { name: 'AbortError' });
 });
 
 test('catalog representative is stable across group order while raw source inventory stays complete', async (t) => {

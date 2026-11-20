@@ -150,6 +150,70 @@ test('missing model leaves unknown music excluded and unchanged cache is reused'
   assert.equal((await filterLibrary(tracks, options, { analyze: true })).counts.instrumental, 1);
 });
 
+test('large library analysis checkpoints cache writes instead of rewriting once per track', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-library-checkpoints-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const ffmpeg = process.env.FFMPEG || 'ffmpeg';
+  const sample = path.join(root, 'sample.wav');
+  await promisify(execFile)(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+    '-i', 'sine=frequency=440:duration=1', sample], { windowsHide: true });
+  const tracks = [];
+  for (let index = 0; index < 27; index += 1) {
+    const file = path.join(root, `track-${String(index).padStart(2, '0')}.wav`);
+    await fs.copyFile(sample, file);
+    tracks.push(file);
+  }
+  let writes = 0;
+  const options = {
+    music: root, ffmpeg, libraryCacheDir: path.join(root, 'cache'),
+    vocalModelPath: path.resolve(__dirname, '../runtime/audio/yamnet.tflite'),
+    createAudioClassifier: async () => ({ classify: async (bytes) => frames(bytes.length / 64000, 0), close() {} }),
+  };
+  const originalWriteFile = fs.writeFile;
+  fs.writeFile = async (file, ...args) => {
+    if (file === cachePath(root, options) + '.part') writes += 1;
+    return originalWriteFile.call(fs, file, ...args);
+  };
+  let result;
+  try { result = await filterLibrary(new Map([['默认', tracks]]), options, { analyze: true }); }
+  finally { fs.writeFile = originalWriteFile; }
+  assert.equal(result.counts.instrumental, 27);
+  assert.equal(writes, 2);
+  assert.equal(Object.keys((await readLibrary(root, options)).files).length, 27);
+});
+
+test('library analysis flushes its pending checkpoint when stopped', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-library-stop-checkpoint-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const ffmpeg = process.env.FFMPEG || 'ffmpeg';
+  const sample = path.join(root, 'sample.wav');
+  await promisify(execFile)(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi',
+    '-i', 'sine=frequency=440:duration=1', sample], { windowsHide: true });
+  const files = [path.join(root, 'track-1.wav'), path.join(root, 'track-2.wav')];
+  await Promise.all(files.map((file) => fs.copyFile(sample, file)));
+  const controller = new AbortController();
+  let writes = 0;
+  const options = {
+    music: root, ffmpeg, libraryCacheDir: path.join(root, 'cache'),
+    vocalModelPath: path.resolve(__dirname, '../runtime/audio/yamnet.tflite'),
+    createAudioClassifier: async () => ({ classify: async (bytes) => frames(bytes.length / 64000, 0), close() {} }),
+  };
+  const originalWriteFile = fs.writeFile;
+  fs.writeFile = async (file, ...args) => {
+    if (file === cachePath(root, options) + '.part') writes += 1;
+    return originalWriteFile.call(fs, file, ...args);
+  };
+  try {
+    await assert.rejects(filterLibrary(new Map([['默认', files]]), options, {
+      analyze: true, signal: controller.signal, progress: () => controller.abort(),
+    }), { name: 'AbortError' });
+  } finally { fs.writeFile = originalWriteFile; }
+  assert.equal(writes, 1);
+  const saved = await readLibrary(root, options);
+  assert.equal(saved.files[files[0]]?.analysis?.status, 'instrumental');
+  assert.equal(saved.files[files[1]], undefined);
+});
+
 test('full-track decoding detects vocals after a long intro, rejects sparse model output and aborts', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'bgm-full-vocals-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

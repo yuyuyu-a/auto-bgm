@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process');
 const { deduplicateMusic } = require('./music-dedup');
 
 const ANALYSIS_VERSION = 'yamnet-1-mediapipe-1.2.2-full-v3';
+const CACHE_CHECKPOINT_INTERVAL = 25;
 // shortcut: thresholds calibrated on this library's initial samples; expand the labeled set before relaxing strict screening.
 const ANALYSIS_SETTINGS = { vocalThreshold: 0.04, uncertainThreshold: 0.015, musicThreshold: 0.15, chunkSeconds: 28.8, aggregateSeconds: 3 };
 const MODEL_SHA256 = '4d8b4a53282dc83ef04e3e7dbc4fbc98082e34e44ed798e16c3a0cdd4c584faf';
@@ -116,6 +117,7 @@ async function filterLibrary(groups, options = {}, { analyze = false, signal, pr
   const files = catalog.files;
   let classifier;
   let initializationError;
+  let pendingCacheChanges = 0;
   const modelPath = options.vocalModelPath || path.resolve(__dirname, '../runtime/audio/yamnet.tflite');
   const report = [];
   try {
@@ -141,14 +143,23 @@ async function filterLibrary(groups, options = {}, { analyze = false, signal, pr
           if (signal?.aborted) throw error;
           entry.analysis = { status: 'unknown', complete: false, reason: error.message, version: ANALYSIS_VERSION, modelSha256: MODEL_SHA256 };
         }
-        await writeLibrary(options.music, library, options);
+        pendingCacheChanges += 1;
+        if (pendingCacheChanges >= CACHE_CHECKPOINT_INTERVAL) {
+          await writeLibrary(options.music, library, options);
+          pendingCacheChanges = 0;
+        }
       }
       const status = trackStatus(entry, currentFingerprint);
       const eligible = status !== 'disabled' && (options.strictInstrumental === false || ['confirmed', 'instrumental'].includes(status));
       report.push({ file, ...entry, status, eligible, reason: status === 'disabled' ? '人工禁用' : status === 'confirmed' ? '人工确认纯音乐' : status === 'vocal' ? '检测到疑似人声' : status === 'instrumental' ? '整曲分析为纯音乐候选' : entry.analysis?.reason || '未扫描或证据不确定' });
       progress?.({ checked: index + 1, total: files.length, file, status });
+      signal?.throwIfAborted();
     }
-  } finally { classifier?.close(); }
+  } finally {
+    try {
+      if (pendingCacheChanges) await writeLibrary(options.music, library, options);
+    } finally { classifier?.close(); }
+  }
   const metadata = new Map(report.map((entry) => [entry.file, entry]));
   const filtered = new Map([...catalog.groups].flatMap(([mood, tracks]) => { const allowed = tracks.filter((file) => metadata.get(file)?.eligible); return allowed.length ? [[mood, allowed]] : []; }));
   return { groups: filtered, files: report, metadata, counts: Object.fromEntries(['confirmed', 'instrumental', 'vocal', 'unknown', 'disabled'].map((status) => [status, report.filter((entry) => entry.status === status).length])) };

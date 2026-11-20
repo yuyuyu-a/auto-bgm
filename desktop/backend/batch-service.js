@@ -246,15 +246,22 @@ async function inspectTools(config) {
   })));
 }
 
-async function checkMusicLibrary(input = {}, progress) {
+async function checkMusicLibrary(input = {}, progress, { hashFile } = {}) {
   if (activeRun || libraryRun) throw new Error('已有批次或曲库分析正在运行');
   const controller = new AbortController();
   libraryRun = controller;
-  try { return await inspectLibrary(input, progress, controller.signal); }
+  try { return await inspectLibrary(input, progress, controller.signal, hashFile); }
   finally { libraryRun = null; }
 }
 
-async function inspectLibrary(input, progress, signal) {
+async function hashContentFile(file, signal) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file, signal ? { signal } : undefined)) hash.update(chunk);
+  signal?.throwIfAborted();
+  return hash.digest('hex');
+}
+
+async function inspectLibrary(input, progress, signal, hashFile = hashContentFile) {
   const config = { ...DEFAULTS, ...input };
   const music = cleanPath(config.music);
   if (!music || (await inspectPath(music, 'music')).status !== 'available') throw new Error('音乐目录不可读取，请重新选择；原始素材未修改。');
@@ -273,18 +280,49 @@ async function inspectLibrary(input, progress, signal) {
   library.health = healthState.musicCatalog;
   await writeLibrary(music, library, config);
   const hashes = new Map();
+  let pendingHealthChanges = 0;
   const duplicates = [...inspected.duplicates];
-  for (const entry of inspected.files) {
-    signal?.throwIfAborted();
-    try {
-      const hash = createHash('sha256');
-      for await (const chunk of createReadStream(entry.file)) hash.update(chunk);
-      const digest = hash.digest('hex');
-      if (hashes.has(digest)) duplicates.push({ file: entry.file, original: hashes.get(digest) });
-      else hashes.set(digest, entry.file);
-    } catch { entry.playable = false; entry.reason = '文件无法读取'; }
+  try {
+    for (const entry of inspected.files) {
+      signal?.throwIfAborted();
+      try {
+        const cached = healthState.musicCatalog[path.resolve(entry.file)];
+        let digest = cached?.fingerprint === entry.fingerprint ? cached.contentHash : null;
+        if (!/^[a-f\d]{64}$/i.test(digest || '')) {
+          digest = await hashFile(entry.file, signal);
+          if (!/^[a-f\d]{64}$/i.test(digest)) throw new Error('文件哈希结果无效');
+          healthState.musicCatalog[path.resolve(entry.file)] = {
+            ...cached,
+            fingerprint: entry.fingerprint,
+            contentHash: digest,
+          };
+          pendingHealthChanges += 1;
+        }
+        if (hashes.has(digest)) duplicates.push({ file: entry.file, original: hashes.get(digest) });
+        else hashes.set(digest, entry.file);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        entry.playable = false;
+        entry.reason = '文件无法读取';
+      }
+      if (pendingHealthChanges >= 100) {
+        library.health = healthState.musicCatalog;
+        await writeLibrary(music, library, config);
+        pendingHealthChanges = 0;
+      }
+    }
+  } finally {
+    if (pendingHealthChanges) {
+      library.health = healthState.musicCatalog;
+      await writeLibrary(music, library, config);
+    }
   }
-  const musicGroups = [...catalog.groups].map(([mood, tracks]) => ({ mood, count: tracks.length, usable: tracks.filter((file) => inspected.files.find((entry) => entry.file === file)?.playable && vocal.metadata.get(file)?.eligible).length }));
+  const inspectedByFile = new Map(inspected.files.map((entry) => [entry.file, entry]));
+  const musicGroups = [...catalog.groups].map(([mood, tracks]) => ({
+    mood,
+    count: tracks.length,
+    usable: tracks.filter((file) => inspectedByFile.get(file)?.playable && vocal.metadata.get(file)?.eligible).length,
+  }));
   const files = inspected.files.map((entry) => ({ ...vocal.metadata.get(entry.file), ...entry, reason: entry.reason || vocal.metadata.get(entry.file)?.reason || '', eligible: Boolean(entry.playable && vocal.metadata.get(entry.file)?.eligible), fileUrl: pathToFileURL(entry.file).href, tooShort: Number.isFinite(entry.duration) && entry.duration < 2 }));
   return { total: inspected.checked, nameDuplicateCount: inspected.duplicates.length, usable: files.filter((entry) => entry.eligible).length, playable: files.filter((entry) => entry.playable).length, counts: vocal.counts, strictInstrumental: config.strictInstrumental !== false, musicGroups, emptyDirectories: directories.filter((name) => !populatedDirectories.has(name)), unavailableMoods: musicGroups.filter((group) => !group.usable).map((group) => group.mood), duplicates, files, checkedAt: new Date().toISOString() };
 }
