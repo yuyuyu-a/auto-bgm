@@ -92,9 +92,9 @@ if ($useCachedFfmpeg) {
   $useCachedFfmpeg = $manifestText.Contains('Archive SHA256: be035a7f1763fdab8430949bed65eab94dc91cbdea1d03607e4ac5403e73ce76')
 }
 if ($useCachedFfmpeg) {
-  $actualFiles = @(Get-ChildItem -LiteralPath $ffmpegTarget -File | Where-Object Name -ne 'SOURCE.txt' | ForEach-Object Name | Sort-Object)
+  $actualFiles = @(Get-ChildItem -LiteralPath $ffmpegTarget -Force -File | Where-Object Name -ne 'SOURCE.txt' | ForEach-Object Name | Sort-Object)
   $expectedFiles = @($ffmpegRuntimeFiles | Sort-Object)
-  $hasExtraDirectories = @(Get-ChildItem -LiteralPath $ffmpegTarget -Directory).Count -gt 0
+  $hasExtraDirectories = @(Get-ChildItem -LiteralPath $ffmpegTarget -Force -Directory).Count -gt 0
   $useCachedFfmpeg = -not $hasExtraDirectories -and [string]::Join('|', $actualFiles) -eq [string]::Join('|', $expectedFiles)
 }
 if ($useCachedFfmpeg) {
@@ -140,9 +140,9 @@ if (-not $useCachedFfmpeg) {
 else {
   Write-Host 'Using the verified FFmpeg runtime cache.'
 }
-$actualFfmpegFiles = @(Get-ChildItem -LiteralPath $ffmpegTarget -File | Where-Object Name -ne 'SOURCE.txt' | ForEach-Object Name | Sort-Object)
+$actualFfmpegFiles = @(Get-ChildItem -LiteralPath $ffmpegTarget -Force -File | Where-Object Name -ne 'SOURCE.txt' | ForEach-Object Name | Sort-Object)
 $expectedFfmpegFiles = @($ffmpegRuntimeFiles | Sort-Object)
-if (@(Get-ChildItem -LiteralPath $ffmpegTarget -Directory).Count -gt 0 -or [string]::Join('|', $actualFfmpegFiles) -ne [string]::Join('|', $expectedFfmpegFiles)) {
+if (@(Get-ChildItem -LiteralPath $ffmpegTarget -Force -Directory).Count -gt 0 -or [string]::Join('|', $actualFfmpegFiles) -ne [string]::Join('|', $expectedFfmpegFiles)) {
   throw 'FFmpeg runtime directory contains missing or unexpected files; refusing to package it.'
 }
 
