@@ -84,11 +84,18 @@ $cachedFfmpegHashes = @{
   'swresample-7.dll' = 'c4909dee2511774d4aef18db9e69013b4f1a3e1194c3f5c1da9ac62297863a05'
   'swscale-10.dll' = '06b1b6d30185e7a1f924717913656693bd015bd6b3471d7c9b8993607d134df6'
 }
+$ffmpegRuntimeFiles = @($cachedFfmpegHashes.Keys)
 $cachedFfmpegManifest = Join-Path $ffmpegTarget 'SOURCE.txt'
 $useCachedFfmpeg = Test-Path -LiteralPath $cachedFfmpegManifest
 if ($useCachedFfmpeg) {
   $manifestText = Get-Content -LiteralPath $cachedFfmpegManifest -Raw
   $useCachedFfmpeg = $manifestText.Contains('Archive SHA256: be035a7f1763fdab8430949bed65eab94dc91cbdea1d03607e4ac5403e73ce76')
+}
+if ($useCachedFfmpeg) {
+  $actualFiles = @(Get-ChildItem -LiteralPath $ffmpegTarget -File | Where-Object Name -ne 'SOURCE.txt' | ForEach-Object Name | Sort-Object)
+  $expectedFiles = @($ffmpegRuntimeFiles | Sort-Object)
+  $hasExtraDirectories = @(Get-ChildItem -LiteralPath $ffmpegTarget -Directory).Count -gt 0
+  $useCachedFfmpeg = -not $hasExtraDirectories -and [string]::Join('|', $actualFiles) -eq [string]::Join('|', $expectedFiles)
 }
 if ($useCachedFfmpeg) {
   foreach ($name in $cachedFfmpegHashes.Keys) {
@@ -116,9 +123,12 @@ if (-not $useCachedFfmpeg) {
   $ffmpegBin = Get-ChildItem -LiteralPath $ffmpegExtract -Directory | ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'ffmpeg.exe') } | Select-Object -First 1
   if (-not $ffmpegBin) { throw 'FFmpeg archive does not contain a win64 bin directory.' }
   New-Item -ItemType Directory -Force -Path $ffmpegTarget | Out-Null
-  Get-ChildItem -LiteralPath $ffmpegBin -File | Where-Object { $_.Name -ne 'ffplay.exe' } | Copy-Item -Destination $ffmpegTarget -Force
+  Get-ChildItem -LiteralPath $ffmpegBin -File | Where-Object { $_.Name -in $ffmpegRuntimeFiles -and $_.Name -ne 'LICENSE.txt' } | Copy-Item -Destination $ffmpegTarget -Force
   $ffmpegRoot = Split-Path -Parent $ffmpegBin
   Copy-Item -LiteralPath (Join-Path $ffmpegRoot 'LICENSE.txt') -Destination (Join-Path $ffmpegTarget 'LICENSE.txt') -Force
+  foreach ($name in $ffmpegRuntimeFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $ffmpegTarget $name))) { throw "FFmpeg runtime is missing a required file: $name" }
+  }
   Set-Content -LiteralPath $cachedFfmpegManifest -Encoding UTF8 -Value @(
     'FFmpeg: n9.0.2-61-gd59078794d-20261121, win64 LGPL shared build',
     'Build release: autobuild-2026-11-21-12-37',
@@ -129,6 +139,11 @@ if (-not $useCachedFfmpeg) {
 }
 else {
   Write-Host 'Using the verified FFmpeg runtime cache.'
+}
+$actualFfmpegFiles = @(Get-ChildItem -LiteralPath $ffmpegTarget -File | Where-Object Name -ne 'SOURCE.txt' | ForEach-Object Name | Sort-Object)
+$expectedFfmpegFiles = @($ffmpegRuntimeFiles | Sort-Object)
+if (@(Get-ChildItem -LiteralPath $ffmpegTarget -Directory).Count -gt 0 -or [string]::Join('|', $actualFfmpegFiles) -ne [string]::Join('|', $expectedFfmpegFiles)) {
+  throw 'FFmpeg runtime directory contains missing or unexpected files; refusing to package it.'
 }
 
 $pyinstaller = Join-Path $root '.venv\Scripts\pyinstaller.exe'

@@ -20,7 +20,7 @@
 - Mammoth 1.13.0：BSD-2-Clause，用于本机提取 Word DOCX 剧本纯文本，不执行文档中的指令，不启用外部文件访问。版权和许可文本见 `licenses/Mammoth-BSD-2-Clause.txt`。其 npm 运行依赖的原始许可随 `app.asar/node_modules/` 保留；其中 SAX 的 Blue Oak Model License 1.0.0 文本亦见 `licenses/SAX-BlueOak-1.0.0.txt`。JSZip 采用其 MIT 许可选项。
 - electron-updater 6.8.12：MIT；许可证文本保存在 `licenses/electron-updater-MIT.txt`。
 - Electron 45.2.2：Electron 的 MIT 许可证；发行包还包含 Electron/Chromium 等上游组件随发行包提供的许可证与 notices。
-- FFmpeg `n9.0.2-45-g1e65c6cd5d-20261103`：使用 BtbN 的 win64 shared 构建。该构建启用 shared 与 version3，未启用 `--enable-gpl`；随安装包提供上游 `LICENSE.txt`。构建来源、归档名和 SHA-256 写在 `runtime/ffmpeg/SOURCE.txt`。
+- FFmpeg n9.0.2 win64 shared LGPL 构建：使用启用 shared 与 version3、未启用 `--enable-gpl` 的上游构建。Windows 打包脚本可复用已校验的 `n9.0.2-45-g1e65c6cd5d-20261103`，或下载并校验 `n9.0.2-61-gd59078794d-20261121`；安装包提供上游 `LICENSE.txt`。实际随包版本、来源、归档名和 SHA-256 记录于 `runtime/ffmpeg/SOURCE.txt`。
 - 转录侧车还包含 PyAV 18.1.0（BSD 3-Clause）、huggingface-hub 2.4.0（Apache-2.0）、tokenizers 0.23.3（Apache-2.0）、ONNX Runtime 1.31.1（MIT）和 Silero VAD 模型（MIT）。本仓库 `licenses/` 目录保留这些组件对应的许可证文本。PyInstaller 6.16.0 使用 GPLv2-or-later with a special exception，允许用其构建并分发非自由程序；例外文本也保存在 `licenses/PyInstaller-LICENSE.txt`。
 
 许可证文本保存在 `licenses/`：faster-whisper、CTranslate2、Electron、electron-updater、llama.cpp、ONNX Runtime 和 Silero VAD 的 MIT 文本，Apache-2.0、FFmpeg LGPL、PyAV 与 PyInstaller 许可证。安装包也会附带本说明和这些文本。
@@ -39,7 +39,8 @@
 - CTranslate2：<https://github.com/OpenNMT/CTranslate2>
 - Electron：<https://github.com/electron/electron>
 - electron-updater：<https://github.com/electron-userland/electron-builder/tree/master/packages/electron-updater>
-- FFmpeg 构建及来源：<https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-11-03-12-50>
+- FFmpeg 旧版构建来源：<https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-11-03-12-50>
+- FFmpeg 可下载构建来源：<https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-21-12-37>
 - PyInstaller：<https://github.com/pyinstaller/pyinstaller>
 
 ## 本项目代码
