@@ -9,6 +9,7 @@ const {
   detectVisionBackend,
   normalizeVisionPlan,
 } = require('../src/local-vision-runtime');
+const { parseSrt } = require('../src/subtitles');
 
 function context(overrides = {}) {
   return {
@@ -149,6 +150,80 @@ test('uses loopback-only inference, retries CPU after GPU startup failure, and s
   assert.ok(progress.some((event) => event.stage === 'vision-completed'));
   await planner.dispose();
   assert.ok(children.every((process) => process.killed));
+});
+
+test('uses one music anchor for English and Chinese subtitles with the same timestamp', async () => {
+  const children = [];
+  const requests = [];
+  const transcript = parseSrt([
+    '1\n00:00:00,000 --> 00:00:01,300\nTwenty minutes later',
+    '2\n00:00:02,000 --> 00:00:03,000\nVivienne walked in',
+    '3\n00:00:04,000 --> 00:00:05,000\nI laughed',
+    '1\n00:00:00,000 --> 00:00:01,300\n二十分钟后',
+    '2\n00:00:02,000 --> 00:00:03,000\n薇薇安走了进来',
+    '3\n00:00:04,000 --> 00:00:05,000\n我笑了',
+  ].join('\n\n'), 6);
+  const episode = context({
+    duration: 6,
+    transcript,
+    frames: [0.5, 2.5, 4.5].map((time, index) => ({ time, path: `frame-${index}.jpg` })),
+  });
+  const planner = createLocalVisionPlanner({
+    root: 'C:/local-vision',
+    platform: 'linux',
+    verifyAssets: async () => ({ manifest: {
+      runtimeServers: { cpu: 'cpu/llama-server' }, modelFileHashes,
+    } }),
+    spawnImpl() {
+      const child = new EventEmitter();
+      child.kill = () => { child.killed = true; child.emit('exit', 0, null); };
+      children.push(child);
+      return child;
+    },
+    pollIntervalMs: 1,
+    readFile: async (file) => Buffer.from(file),
+    async fetchImpl(url, options = {}) {
+      if (url.endsWith('/health')) return new Response('', { status: 200 });
+      const body = JSON.parse(options.body);
+      const data = JSON.parse(body.messages[1].content[0].text.split('可用信息：\n')[1]);
+      requests.push(data);
+      const anchors = data.requirements.allowedStartSegments;
+      const cues = anchors.map((anchor, index) => {
+        const nextAnchor = anchors[index + 1];
+        const nextStart = Number.isSafeInteger(nextAnchor)
+          ? transcript.segments[nextAnchor].start
+          : episode.duration;
+        const frameTime = data.requirements.frameTimes.find((time) =>
+          time >= transcript.segments[anchor].start && time < nextStart);
+        return {
+          startSegment: anchor, mood: '温情', intensity: 1, confidence: 0.9,
+          reason: '画面与对白表现人物关系。', sceneDescription: '人物在画面中交谈。',
+          dramaticIntent: '延续人物关系。',
+          evidence: {
+            frameTimes: [frameTime ?? data.requirements.frameTimes[0]],
+            subtitleIndices: data.subtitles
+              .filter(({ id }) => id >= anchor && (!Number.isSafeInteger(nextAnchor) || id < nextAnchor))
+              .map(({ id }) => id),
+          },
+        };
+      });
+      return Response.json({ choices: [{ message: { content: JSON.stringify({
+        summary: '按双语字幕时间点划分剧情。',
+        alignmentConfidence: 0.9,
+        cues,
+      }) } }] });
+    },
+  });
+
+  const result = await planner.plan(episode);
+  await planner.dispose();
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].requirements.allowedStartSegments, [0, 2, 4]);
+  assert.deepEqual(result.cues.map(({ startSegment }) => startSegment), [0, 2, 4]);
+  assert.deepEqual(result.cues.map(({ evidence }) => evidence.subtitleIndices), [
+    [0, 1], [2, 3], [4, 5],
+  ]);
+  assert.ok(children.every((child) => child.killed));
 });
 
 test('splits long visual analysis into bounded requests and merges global subtitle anchors', async () => {

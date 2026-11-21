@@ -87,11 +87,22 @@ function subtitleIndicesForFrames(transcript, frames, includeInitial = true) {
   return [...selected].sort((a, b) => a - b).slice(0, MAX_SUBTITLE_CUES);
 }
 
+function uniqueMusicAnchorIndices(indices, segments) {
+  const seenStarts = new Set();
+  return [...new Set(indices)].filter((id) => {
+    const start = segments[id]?.start;
+    if (!Number.isFinite(start) || seenStarts.has(start)) return false;
+    seenStarts.add(start);
+    return true;
+  });
+}
+
 function makeVisionTask(context, frames, allowedFrameTimes, anchorIndices, visibleSubtitleIndices, {
   startTime = 0,
   endTime = context.duration,
 } = {}) {
-  const anchors = [...new Set(anchorIndices)].sort((a, b) => a - b);
+  const anchors = uniqueMusicAnchorIndices(anchorIndices, context.transcript.segments)
+    .sort((a, b) => a - b);
   const visible = [...new Set([...visibleSubtitleIndices, ...anchors])]
     .sort((a, b) => a - b).slice(0, MAX_SUBTITLE_CUES);
   return {

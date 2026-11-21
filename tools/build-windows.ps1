@@ -71,27 +71,65 @@ Set-Content -LiteralPath (Join-Path $modelTarget 'SOURCE.txt') -Encoding UTF8 -V
   'model.bin SHA256: 3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671'
 )
 
-$ffmpegArchive = Join-Path $root 'build\ffmpeg-n9.0.2-45-g1e65c6cd5d-win64-lgpl-shared-9.0.zip'
-$ffmpegUrl = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-03-12-50/ffmpeg-n9.0.2-45-g1e65c6cd5d-win64-lgpl-shared-9.0.zip'
-if (-not (Test-Path -LiteralPath $ffmpegArchive)) { Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegArchive }
-$ffmpegHash = (Get-Sha256 $ffmpegArchive)
-if ($ffmpegHash -ne 'be035a7f1763fdab8430949bed65eab94dc91cbdea1d03607e4ac5403e73ce76') { throw 'FFmpeg archive hash mismatch; refusing to package an unverified build.' }
-$ffmpegExtract = Join-Path $root 'build\ffmpeg-n9.0.2-extract'
-Expand-Archive -LiteralPath $ffmpegArchive -DestinationPath $ffmpegExtract -Force
-$ffmpegBin = Get-ChildItem -LiteralPath $ffmpegExtract -Directory | ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'ffmpeg.exe') } | Select-Object -First 1
-if (-not $ffmpegBin) { throw 'FFmpeg archive does not contain a win64 bin directory.' }
 $ffmpegTarget = Join-Path $root 'runtime\ffmpeg'
-New-Item -ItemType Directory -Force -Path $ffmpegTarget | Out-Null
-Get-ChildItem -LiteralPath $ffmpegBin -File | Where-Object { $_.Name -ne 'ffplay.exe' } | Copy-Item -Destination $ffmpegTarget -Force
-$ffmpegRoot = Split-Path -Parent $ffmpegBin
-Copy-Item -LiteralPath (Join-Path $ffmpegRoot 'LICENSE.txt') -Destination (Join-Path $ffmpegTarget 'LICENSE.txt') -Force
-Set-Content -LiteralPath (Join-Path $ffmpegTarget 'SOURCE.txt') -Encoding UTF8 -Value @(
-  'FFmpeg: n9.0.2-45-g1e65c6cd5d-20261103, win64 LGPL shared build',
-  'Build release: autobuild-2026-11-03-12-50',
-  'Source/build recipe: https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-11-03-12-50',
-  'Archive: ffmpeg-n9.0.2-45-g1e65c6cd5d-win64-lgpl-shared-9.0.zip',
-  'Archive SHA256: be035a7f1763fdab8430949bed65eab94dc91cbdea1d03607e4ac5403e73ce76'
-)
+$cachedFfmpegHashes = @{
+  'avcodec-63.dll' = 'e3e1e127802851af303dd2d2d6f592b7b30edb2c0d2dd7e2052f4db50cc09b9e'
+  'avdevice-63.dll' = '92d1ffb887a10008b5e6fffb51b046b04379c40e2a19190643073abbc217a48e'
+  'avfilter-12.dll' = '00ff2f14f8bf6cda1840813537bbd3542f07c7c1eb872e38de7922aa2e1f906a'
+  'avformat-63.dll' = '30cb1ee2bb298930ba735114a0d646f644c11921e470a6433f731e4ac5bcddf5'
+  'avutil-61.dll' = '19e53b9016b85c8d12538de68facc6836e7635880296299c943f542844ae6306'
+  'ffmpeg.exe' = '9dc0a01c012be2f1ed64f5e33a090367c844480fccebf55d60a883676847d735'
+  'ffprobe.exe' = '45983230aae258f1568466d0254015c64a14ab565aff9b110b60a41222ce2f13'
+  'LICENSE.txt' = 'da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768'
+  'swresample-7.dll' = 'c4909dee2511774d4aef18db9e69013b4f1a3e1194c3f5c1da9ac62297863a05'
+  'swscale-10.dll' = '06b1b6d30185e7a1f924717913656693bd015bd6b3471d7c9b8993607d134df6'
+}
+$cachedFfmpegManifest = Join-Path $ffmpegTarget 'SOURCE.txt'
+$useCachedFfmpeg = Test-Path -LiteralPath $cachedFfmpegManifest
+if ($useCachedFfmpeg) {
+  $manifestText = Get-Content -LiteralPath $cachedFfmpegManifest -Raw
+  $useCachedFfmpeg = $manifestText.Contains('Archive SHA256: be035a7f1763fdab8430949bed65eab94dc91cbdea1d03607e4ac5403e73ce76')
+}
+if ($useCachedFfmpeg) {
+  foreach ($name in $cachedFfmpegHashes.Keys) {
+    $file = Join-Path $ffmpegTarget $name
+    if (-not (Test-Path -LiteralPath $file) -or (Get-Sha256 $file) -ne $cachedFfmpegHashes[$name]) {
+      $useCachedFfmpeg = $false
+      break
+    }
+  }
+}
+if (-not $useCachedFfmpeg) {
+  $ffmpegArchive = Join-Path $root 'build\ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0.zip'
+  $ffmpegDownload = "$ffmpegArchive.download"
+  $ffmpegUrl = 'https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-21-12-37/ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0.zip'
+  $expectedFfmpegHash = '499fa5e468f9ea6a4d38647f81f9ca4a9ac33655f30faf54b7a800ca9f4d6e5f'
+  $ffmpegHash = if (Test-Path -LiteralPath $ffmpegArchive) { Get-Sha256 $ffmpegArchive } else { '' }
+  if ($ffmpegHash -ne $expectedFfmpegHash) {
+    Invoke-WebRequest -Uri $ffmpegUrl -OutFile $ffmpegDownload
+    $ffmpegHash = Get-Sha256 $ffmpegDownload
+    if ($ffmpegHash -ne $expectedFfmpegHash) { throw 'FFmpeg archive hash mismatch; refusing to package an unverified build.' }
+    Move-Item -LiteralPath $ffmpegDownload -Destination $ffmpegArchive -Force
+  }
+  $ffmpegExtract = Join-Path $root 'build\ffmpeg-n9.0.2-61-extract'
+  Expand-Archive -LiteralPath $ffmpegArchive -DestinationPath $ffmpegExtract -Force
+  $ffmpegBin = Get-ChildItem -LiteralPath $ffmpegExtract -Directory | ForEach-Object { Join-Path $_.FullName 'bin' } | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'ffmpeg.exe') } | Select-Object -First 1
+  if (-not $ffmpegBin) { throw 'FFmpeg archive does not contain a win64 bin directory.' }
+  New-Item -ItemType Directory -Force -Path $ffmpegTarget | Out-Null
+  Get-ChildItem -LiteralPath $ffmpegBin -File | Where-Object { $_.Name -ne 'ffplay.exe' } | Copy-Item -Destination $ffmpegTarget -Force
+  $ffmpegRoot = Split-Path -Parent $ffmpegBin
+  Copy-Item -LiteralPath (Join-Path $ffmpegRoot 'LICENSE.txt') -Destination (Join-Path $ffmpegTarget 'LICENSE.txt') -Force
+  Set-Content -LiteralPath $cachedFfmpegManifest -Encoding UTF8 -Value @(
+    'FFmpeg: n9.0.2-61-gd59078794d-20261121, win64 LGPL shared build',
+    'Build release: autobuild-2026-11-21-12-37',
+    'Source/build recipe: https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-21-12-37',
+    'Archive: ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0.zip',
+    'Archive SHA256: 499fa5e468f9ea6a4d38647f81f9ca4a9ac33655f30faf54b7a800ca9f4d6e5f'
+  )
+}
+else {
+  Write-Host 'Using the verified FFmpeg runtime cache.'
+}
 
 $pyinstaller = Join-Path $root '.venv\Scripts\pyinstaller.exe'
 if (-not (Test-Path -LiteralPath $pyinstaller)) { throw 'Missing PyInstaller. Install requirements-build.txt first.' }
