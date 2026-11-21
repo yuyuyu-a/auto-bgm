@@ -1451,6 +1451,7 @@ test('local visual mode plans from SRT and sampled frames without an API or spee
           evidence: { frameTimes: [context.frames[0].time], subtitleIndices: [0] },
         }],
       };
+      context.onProgress({ stage: 'splitting-vision', backend: 'cpu', batchFrames: 2, batchCues: 1 });
       context.onProgress({ stage: 'vision-completed', backend: 'cpu', gpu: false });
       return plan;
     },
@@ -1460,6 +1461,7 @@ test('local visual mode plans from SRT and sampled frames without an API or spee
   assert.equal(result.completed, 1, JSON.stringify(result.results));
   assert.ok(progress.some((event) => event.stage === 'sampling-frames' && event.frames > 0));
   assert.ok(progress.some((event) => event.stage === 'analyzing-vision'));
+  assert.ok(progress.some((event) => event.stage === 'splitting-vision'));
   assert.ok(progress.some((event) => event.stage === 'vision-completed'));
   assert.equal(received.transcript.source, 'srt');
   assert.deepEqual(received.transcript.segments.map(({ start, end }) => [start, end]), [[0.2, 1.1], [2, 3]]);

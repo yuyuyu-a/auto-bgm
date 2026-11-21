@@ -423,7 +423,13 @@ async function inspectMusicCatalog(groups, ffprobe, ffmpeg, signal, state, allow
     return usable.length ? [[mood, usable]] : [];
   }));
   if (!usableGroups.size && !allowEmpty) throw new Error('背景音乐目录中没有可用的非静音音轨，已检查 ' + files.length + ' 首并跳过 ' + skipped + ' 首');
-  return { groups: usableGroups, checked: files.length, skipped, duplicates: catalog.duplicates, files: [...checked].map(([file, entry]) => ({ file, ...entry })) };
+  return {
+    groups: usableGroups,
+    checked: files.length,
+    skipped,
+    duplicates: catalog.duplicates,
+    files: catalog.files.map((file) => ({ file, ...checked.get(file) })),
+  };
 }
 
 function clamp(value, min, max) {
@@ -1504,7 +1510,7 @@ async function runBatch(options, logger = console) {
         },
         onVisionProgress(event) {
           const safeProgress = Object.fromEntries(
-            ['stage', 'frame', 'frames', 'completed', 'total', 'percent', 'backend', 'gpu']
+            ['stage', 'frame', 'frames', 'completed', 'total', 'percent', 'backend', 'gpu', 'batchFrames', 'batchCues']
               .filter((key) => event?.[key] !== undefined)
               .map((key) => [key, event[key]]),
           );

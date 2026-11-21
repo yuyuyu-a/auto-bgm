@@ -151,6 +151,158 @@ test('uses loopback-only inference, retries CPU after GPU startup failure, and s
   assert.ok(children.every((process) => process.killed));
 });
 
+test('splits long visual analysis into bounded requests and merges global subtitle anchors', async () => {
+  const children = [];
+  const requests = [];
+  const segments = Array.from({ length: 10 }, (_, index) => ({
+    start: index + 0.1, end: index + 0.4, text: `字幕 ${index}`,
+  }));
+  const episode = context({
+    duration: 10,
+    transcript: { segments },
+    frames: Array.from({ length: 10 }, (_, index) => ({
+      time: index + 0.5, path: `frame-${index}.jpg`,
+    })),
+  });
+  const planner = createLocalVisionPlanner({
+    root: 'C:/local-vision',
+    platform: 'linux',
+    verifyAssets: async () => ({ manifest: {
+      runtimeServers: { cpu: 'cpu/llama-server' }, modelFileHashes,
+    } }),
+    spawnImpl() {
+      const child = new EventEmitter();
+      child.kill = () => { child.killed = true; child.emit('exit', 0, null); };
+      children.push(child);
+      return child;
+    },
+    pollIntervalMs: 1,
+    readFile: async (file) => Buffer.from(file),
+    async fetchImpl(url, options = {}) {
+      if (url.endsWith('/health')) return new Response('', { status: 200 });
+      const body = JSON.parse(options.body);
+      const requestText = body.messages[1].content[0].text;
+      const data = JSON.parse(requestText.split('可用信息：\n')[1]);
+      requests.push(data);
+      const anchor = data.requirements.allowedStartSegments[0];
+      const frameTime = data.sampledFrameTimes.find((time) => time >= segments[anchor].start);
+      assert.notEqual(frameTime, undefined);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({
+        summary: `第 ${anchor} 段`,
+        alignmentConfidence: 0.9,
+        cues: [{
+          startSegment: anchor, mood: '温情', intensity: 2, confidence: 0.9,
+          reason: '画面和对白呈现持续的温情。', sceneDescription: '人物在画面中交谈。',
+          dramaticIntent: '延续人物关系。',
+          evidence: { frameTimes: [frameTime], subtitleIndices: [anchor] },
+        }],
+      }) } }] });
+    },
+  });
+
+  const result = await planner.plan(episode);
+  await planner.dispose();
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((request) => request.sampledFrameTimes.length <= 4));
+  assert.deepEqual(requests.map((request) => request.requirements.frameTimes.length), [4, 3, 3]);
+  assert.equal(requests[1].sampledFrameTimes[0], requests[0].sampledFrameTimes.at(-1));
+  assert.ok(!requests[1].requirements.frameTimes.includes(requests[1].sampledFrameTimes[0]));
+  assert.deepEqual(
+    [...new Set(requests.flatMap((request) => request.requirements.allowedStartSegments))].sort((a, b) => a - b),
+    Array.from({ length: 10 }, (_value, index) => index),
+  );
+  assert.deepEqual(result.cues.map(({ startSegment }) => startSegment), [0, 4, 7]);
+  assert.ok(children.every((child) => child.killed));
+});
+
+test('recursively splits only truncated visual batches and merges their plans', async () => {
+  const children = [];
+  const requests = [];
+  const progress = [];
+  const segments = Array.from({ length: 4 }, (_, index) => ({
+    start: index + 0.1, end: index + 0.4, text: `字幕 ${index}`,
+  }));
+  const episode = context({
+    duration: 4,
+    transcript: { segments },
+    frames: Array.from({ length: 4 }, (_, index) => ({
+      time: index + 0.5, path: `frame-${index}.jpg`,
+    })),
+  });
+  const planner = createLocalVisionPlanner({
+    root: 'C:/local-vision',
+    platform: 'linux',
+    verifyAssets: async () => ({ manifest: {
+      runtimeServers: { cpu: 'cpu/llama-server' }, modelFileHashes,
+    } }),
+    spawnImpl() {
+      const child = new EventEmitter();
+      child.kill = () => { child.killed = true; child.emit('exit', 0, null); };
+      children.push(child);
+      return child;
+    },
+    pollIntervalMs: 1,
+    readFile: async (file) => Buffer.from(file),
+    async fetchImpl(url, options = {}) {
+      if (url.endsWith('/health')) return new Response('', { status: 200 });
+      const body = JSON.parse(options.body);
+      const data = JSON.parse(body.messages[1].content[0].text.split('可用信息：\n')[1]);
+      requests.push(data);
+      if (requests.length === 1) {
+        return Response.json({ choices: [{ finish_reason: 'length', message: { content: '' } }] });
+      }
+      const anchor = data.requirements.allowedStartSegments[0];
+      const frameTime = data.sampledFrameTimes.find((time) => time >= segments[anchor].start);
+      assert.notEqual(frameTime, undefined);
+      return Response.json({ choices: [{ message: { content: JSON.stringify({
+        summary: `第 ${anchor} 段`,
+        alignmentConfidence: 0.9,
+        cues: [{
+          startSegment: anchor, mood: '温情', intensity: 2, confidence: 0.9,
+          reason: '画面和对白呈现持续的温情。', sceneDescription: '人物在画面中交谈。',
+          dramaticIntent: '延续人物关系。',
+          evidence: { frameTimes: [frameTime], subtitleIndices: [anchor] },
+        }],
+      }) } }] });
+    },
+  });
+
+  const result = await planner.plan({ ...episode, onProgress: (event) => progress.push(event) });
+  await planner.dispose();
+  assert.deepEqual(requests.map((request) => request.requirements.allowedStartSegments.length), [4, 2, 2]);
+  assert.deepEqual(requests.map((request) => request.sampledFrameTimes.length), [4, 2, 2]);
+  assert.deepEqual(result.cues.map(({ startSegment }) => startSegment), [0, 2]);
+  assert.ok(progress.some((event) => event.stage === 'splitting-vision'));
+  assert.ok(children.every((child) => child.killed));
+});
+
+test('reports irreducible truncation without incorrectly asking to shorten the video', async () => {
+  const child = new EventEmitter();
+  child.kill = () => { child.killed = true; child.emit('exit', 0, null); };
+  const planner = createLocalVisionPlanner({
+    root: 'C:/local-vision',
+    platform: 'linux',
+    verifyAssets: async () => ({ manifest: {
+      runtimeServers: { cpu: 'cpu/llama-server' }, modelFileHashes,
+    } }),
+    spawnImpl: () => child,
+    pollIntervalMs: 1,
+    readFile: async () => Buffer.from('frame'),
+    async fetchImpl(url) {
+      if (url.endsWith('/health')) return new Response('', { status: 200 });
+      return Response.json({ choices: [{ finish_reason: 'length', message: { content: '' } }] });
+    },
+  });
+
+  await assert.rejects(planner.plan(context({
+    duration: 2,
+    transcript: { segments: [{ start: 0, end: 1, text: '只有一条字幕。' }] },
+    frames: [{ time: 0.5, path: 'frame.jpg' }],
+  })), /最小字幕与画面分析批次仍被模型截断/);
+  await planner.dispose();
+  assert.equal(child.killed, true);
+});
+
 test('retries CPU when GPU inference fails after the server becomes healthy', async () => {
   const started = [];
   const children = [];
