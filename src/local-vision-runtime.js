@@ -298,6 +298,7 @@ function normalizeVisionPlan(raw, context) {
   const allowedStartIndices = new Set(context.allowedStartIndices || allowedIndices);
   const firstSubtitleIndex = Number.isSafeInteger(context.firstSubtitleIndex) ? context.firstSubtitleIndex : 0;
   const allowedFrameTimes = new Set(context.allowedFrameTimes || frames.map(({ time }) => time));
+  const sampledFrameTimes = new Set(frames.map(({ time }) => time));
   let previousAnchor = -1;
   const cues = raw.cues.map((cue, index) => {
     if (!cue || !Number.isSafeInteger(cue.startSegment) || cue.startSegment <= previousAnchor ||
@@ -318,19 +319,28 @@ function normalizeVisionPlan(raw, context) {
         throw new Error('本地画面配乐缺少有效的画面描述、剧情意图或选曲依据。');
       }
     }
-    const evidence = cue.evidence;
     const requestedNextAnchor = raw.cues[index + 1]?.startSegment;
     const nextSegment = Number.isSafeInteger(requestedNextAnchor) ? segments[requestedNextAnchor] : null;
     const nextAnchor = nextSegment ? requestedNextAnchor : segments.length;
     const cueStart = index === 0 && cue.startSegment === 0 ? 0 : segments[cue.startSegment].start;
     const cueEnd = nextSegment ? nextSegment.start : duration;
-    if (!evidence || !Array.isArray(evidence.frameTimes) || !evidence.frameTimes.length ||
-        !Array.isArray(evidence.subtitleIndices) || !evidence.subtitleIndices.length ||
-        evidence.frameTimes.some((time) => !allowedFrameTimes.has(time)) ||
-        evidence.frameTimes.some((time) => time < cueStart || time >= cueEnd) ||
-        evidence.subtitleIndices.some((id) => !Number.isSafeInteger(id) || !allowedIndices.has(id) || !segments[id]) ||
-        evidence.subtitleIndices.some((id) => id < cue.startSegment || id >= nextAnchor) ||
-        !evidence.subtitleIndices.includes(cue.startSegment)) {
+    const validFrameTimes = Array.isArray(cue.evidence?.frameTimes)
+      ? [...new Set(cue.evidence.frameTimes)].filter((time) =>
+        allowedFrameTimes.has(time) && sampledFrameTimes.has(time) && time >= cueStart && time < cueEnd)
+      : [];
+    const frameTimes = validFrameTimes.length ? validFrameTimes : [...allowedFrameTimes].filter((time) =>
+      sampledFrameTimes.has(time) && time >= cueStart && time < cueEnd).sort((a, b) => a - b);
+    const validSubtitleIndices = Array.isArray(cue.evidence?.subtitleIndices)
+      ? [...new Set(cue.evidence.subtitleIndices)].filter((id) =>
+        Number.isSafeInteger(id) && allowedIndices.has(id) && segments[id] &&
+        id >= cue.startSegment && id < nextAnchor)
+      : [];
+    const subtitleIndices = validSubtitleIndices.includes(cue.startSegment)
+      ? validSubtitleIndices
+      : [...allowedIndices].filter((id) =>
+        Number.isSafeInteger(id) && segments[id] && id >= cue.startSegment && id < nextAnchor)
+        .sort((a, b) => a - b);
+    if (!frameTimes.length || !subtitleIndices.includes(cue.startSegment)) {
       throw new Error('本地画面配乐依据必须对应当前音乐段内的实际抽帧时刻和字幕索引。');
     }
     previousAnchor = cue.startSegment;
@@ -345,8 +355,8 @@ function normalizeVisionPlan(raw, context) {
       confidence: cue.confidence,
       review: cue.review === true || cue.confidence < 0.75 || raw.alignmentConfidence < 0.75,
       evidence: {
-        frameTimes: [...new Set(evidence.frameTimes)],
-        subtitleIndices: [...new Set(evidence.subtitleIndices)],
+        frameTimes,
+        subtitleIndices,
       },
     };
   });

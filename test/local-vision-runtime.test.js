@@ -49,19 +49,30 @@ test('validates local cues against exact subtitle anchors, sampled frames, and s
   assert.deepEqual(result.cues[1].evidence.frameTimes, [10]);
 });
 
-test('rejects invented timestamps, unscreened music, null silence, and ungrounded evidence', () => {
+test('rebuilds model-generated evidence from sampled frames and subtitles when its references are invalid', () => {
+  const inaccurateEvidence = structuredClone(rawPlan);
+  inaccurateEvidence.cues[0].evidence = { frameTimes: [7], subtitleIndices: [99] };
+  inaccurateEvidence.cues[1].evidence = { frameTimes: [1], subtitleIndices: [0] };
+
+  const result = normalizeVisionPlan(inaccurateEvidence, context());
+
+  assert.deepEqual(result.cues.map(({ evidence }) => evidence), [
+    { frameTimes: [1], subtitleIndices: [0, 1] },
+    { frameTimes: [10], subtitleIndices: [2] },
+  ]);
+});
+
+test('rejects invalid anchors, unscreened music, null silence, and invalid confidence', () => {
   const invalidPlans = [
     { ...rawPlan, cues: [{ ...rawPlan.cues[0], startSegment: 12 }] },
     { ...rawPlan, cues: [{ ...rawPlan.cues[0], mood: '任意曲库' }] },
     { ...rawPlan, cues: [{ ...rawPlan.cues[0], mood: null }] },
-    { ...rawPlan, cues: [{ ...rawPlan.cues[0], evidence: { frameTimes: [7], subtitleIndices: [0] } }] },
-    { ...rawPlan, cues: [{ ...rawPlan.cues[0], evidence: { frameTimes: [1], subtitleIndices: [99] } }] },
-    { ...rawPlan, cues: [rawPlan.cues[0], { ...rawPlan.cues[1], evidence: { frameTimes: [1], subtitleIndices: [2] } }] },
-    { ...rawPlan, cues: [{ ...rawPlan.cues[0], evidence: { frameTimes: [1], subtitleIndices: [0, 2] } }, rawPlan.cues[1]] },
     { ...rawPlan, cues: [{ ...rawPlan.cues[0], confidence: 2 }] },
-    { ...rawPlan, cues: [rawPlan.cues[0], { ...rawPlan.cues[1], startSegment: 1 }] },
+    { ...rawPlan, cues: [rawPlan.cues[0], { ...rawPlan.cues[1], startSegment: 0 }] },
   ];
   for (const plan of invalidPlans) assert.throws(() => normalizeVisionPlan(plan, context()), /画面|字幕|曲库|音乐|时间|依据|置信|锚点/);
+  assert.throws(() => normalizeVisionPlan(rawPlan, context({ allowedFrameTimes: [] })),
+    /本地画面配乐依据必须对应当前音乐段内的实际抽帧时刻和字幕索引/);
 });
 
 test('requires scene intent and confidence, and marks uncertain cues for review', () => {
