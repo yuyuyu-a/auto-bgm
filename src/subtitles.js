@@ -25,7 +25,8 @@ function parseSrt(text, duration) {
   if (!normalized) throw new Error('SRT 字幕为空，请选择包含有效时间轴的字幕文件。');
   const blocks = normalized.split(/\n[ \t]*\n+/);
   if (blocks.length > MAX_SUBTITLE_CUES) throw new Error(`SRT 字幕超过 ${MAX_SUBTITLE_CUES} 条，请按集拆分。`);
-  const segments = [];
+  const tracks = [[]];
+  let sourceOrder = 0;
   for (const block of blocks) {
     const lines = block.split('\n');
     const timeIndex = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
@@ -36,15 +37,36 @@ function parseSrt(text, duration) {
     const end = subtitleTime(match[2]);
     if (end <= start) throw new Error('SRT 字幕结束时间必须晚于开始时间。');
     if (end > duration) throw new Error('SRT 字幕时间超过视频时长，请确认字幕与视频为同一剪辑版本。');
-    if (segments.length && start < segments.at(-1).start) throw new Error('SRT 字幕时间顺序异常，请按开始时间检查字幕。');
+    let track = tracks.at(-1);
+    if (track.length && start < track.at(-1).start) {
+      if (tracks.length === 1 && start === tracks[0][0].start) {
+        track = [];
+        tracks.push(track);
+      } else {
+        throw new Error('SRT 字幕时间顺序异常，请按开始时间检查字幕。');
+      }
+    }
     const cueText = lines.slice(timeIndex + 1).join(' ')
       .replace(/<[^>]*>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     if (!cueText) throw new Error('SRT 字幕包含没有对白内容的时间段。');
-    segments.push({ start, end, text: cueText });
+    track.push({ start, end, text: cueText, sourceOrder: sourceOrder++ });
   }
-  if (!segments.length) throw new Error('SRT 字幕为空，请选择包含有效时间轴的字幕文件。');
+  if (tracks.length === 2) {
+    let firstTrackIndex = 0;
+    for (const segment of tracks[1]) {
+      while (firstTrackIndex < tracks[0].length
+        && tracks[0][firstTrackIndex].start !== segment.start) firstTrackIndex++;
+      if (firstTrackIndex === tracks[0].length) {
+        throw new Error('SRT 字幕时间顺序异常，请按开始时间检查字幕。');
+      }
+      firstTrackIndex++;
+    }
+  }
+  const segments = tracks.flat()
+    .sort((a, b) => a.start - b.start || a.sourceOrder - b.sourceOrder)
+    .map(({ start, end, text }) => ({ start, end, text }));
   return { segments, language: null };
 }
 

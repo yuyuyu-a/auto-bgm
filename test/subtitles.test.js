@@ -22,6 +22,68 @@ test('preserves duplicate and overlapping dialogue cues while requiring ordered 
   assert.throws(() => parseSrt('1\n00:00:03,000 --> 00:00:04,000\nLate\n\n2\n00:00:02,000 --> 00:00:03,000\nEarly', 5), /顺序/);
 });
 
+test('accepts two ordered subtitle tracks concatenated with the second track restarting at zero', () => {
+  const result = parseSrt([
+    '1\n00:00:00,000 --> 00:00:01,000\nHello',
+    '2\n00:00:02,000 --> 00:00:03,000\nGoodbye',
+    '1\n00:00:00,000 --> 00:00:01,000\n你好',
+    '2\n00:00:02,000 --> 00:00:03,000\n再见',
+  ].join('\n\n'), 4);
+
+  assert.deepEqual(result.segments, [
+    { start: 0, end: 1, text: 'Hello' },
+    { start: 0, end: 1, text: '你好' },
+    { start: 2, end: 3, text: 'Goodbye' },
+    { start: 2, end: 3, text: '再见' },
+  ]);
+});
+
+test('accepts bilingual tracks whose first shared cue starts after the video begins', () => {
+  const result = parseSrt([
+    '1\n00:00:01,000 --> 00:00:02,000\nHello',
+    '2\n00:00:03,000 --> 00:00:04,000\nGoodbye',
+    '1\n00:00:01,000 --> 00:00:02,000\n你好',
+    '2\n00:00:03,000 --> 00:00:04,000\n再见',
+  ].join('\n\n'), 5);
+
+  assert.deepEqual(result.segments, [
+    { start: 1, end: 2, text: 'Hello' },
+    { start: 1, end: 2, text: '你好' },
+    { start: 3, end: 4, text: 'Goodbye' },
+    { start: 3, end: 4, text: '再见' },
+  ]);
+});
+
+test('rejects a single-track ordering error that only rewinds to the first cue time', () => {
+  const text = [
+    '1\n00:00:01,000 --> 00:00:02,000\nFirst',
+    '2\n00:00:03,000 --> 00:00:04,000\nLater',
+    '3\n00:00:01,000 --> 00:00:01,500\nBackwards',
+    '4\n00:00:02,000 --> 00:00:02,500\nStill backwards',
+  ].join('\n\n');
+
+  assert.throws(() => parseSrt(text, 5), /顺序/);
+});
+
+test('rejects further out-of-order cues after recognizing a second subtitle track', () => {
+  for (const text of [
+    [
+      '1\n00:00:00,000 --> 00:00:01,000\nHello',
+      '2\n00:00:02,000 --> 00:00:03,000\nGoodbye',
+      '3\n00:00:00,000 --> 00:00:01,000\n你好',
+      '4\n00:00:02,000 --> 00:00:03,000\n再见',
+      '5\n00:00:00,000 --> 00:00:01,000\nThird track',
+    ].join('\n\n'),
+    [
+      '1\n00:00:00,000 --> 00:00:01,000\nHello',
+      '2\n00:00:02,000 --> 00:00:03,000\nGoodbye',
+      '3\n00:00:00,000 --> 00:00:01,000\n你好',
+      '4\n00:00:02,000 --> 00:00:03,000\n再见',
+      '5\n00:00:01,000 --> 00:00:01,500\nBackwards inside second track',
+    ].join('\n\n'),
+  ]) assert.throws(() => parseSrt(text, 5), /顺序/);
+});
+
 test('rejects malformed, reversed, empty, or out-of-duration subtitles instead of dropping cues', () => {
   for (const value of [
     'not an SRT cue',
